@@ -13,10 +13,9 @@ import org.springframework.stereotype.Component;
 public final class SurveyCatalog {
     public static final String SURVEY_VERSION = "yfsi-ko-v1";
 
-    private static final List<String> AGREEMENT =
-            List.of("전혀 그렇지 않다", "그렇지 않다", "보통이다", "그렇다", "매우 그렇다");
-    private static final List<String> OVERALL_STRESS =
-            List.of("매우 낮음", "낮음", "보통", "높음", "매우 높음");
+    private static final List<Option> RESPONSE_OPTIONS = List.of(
+            new Option(1, "매우낮음"), new Option(2, "낮음"), new Option(3, "보통"),
+            new Option(4, "높음"), new Option(5, "매우높음"));
 
     public record Option(int value, String label) {}
     public record Question(int number, String text, List<Option> options) {}
@@ -31,11 +30,8 @@ public final class SurveyCatalog {
             if (texts.size() != YfsiScoring.QUESTION_COUNT || texts.stream().anyMatch(String::isBlank)) {
                 throw new IllegalStateException("설문 원문에는 빈 줄 없이 30개 문항이 필요합니다.");
             }
-            var agreement = options(AGREEMENT);
-            var overallStress = options(OVERALL_STRESS);
             current = new Survey(SURVEY_VERSION, IntStream.range(0, texts.size())
-                    .mapToObj(index -> new Question(index + 1, texts.get(index),
-                            index == texts.size() - 1 ? overallStress : agreement))
+                    .mapToObj(index -> new Question(index + 1, texts.get(index), RESPONSE_OPTIONS))
                     .toList());
         }
     }
@@ -44,7 +40,4 @@ public final class SurveyCatalog {
         return current;
     }
 
-    private static List<Option> options(List<String> labels) {
-        return IntStream.range(0, labels.size()).mapToObj(i -> new Option(i + 1, labels.get(i))).toList();
-    }
 }
