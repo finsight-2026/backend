@@ -41,8 +41,9 @@ class GuideController {
     }
 
     @PostMapping("/{id}/view")
-    GuideService.Detail view(@AuthenticationPrincipal Jwt jwt, @PathVariable String id, @RequestParam UUID attemptId) {
-        return guides.view(user(jwt), attemptId, id);
+    GuideService.Detail view(@AuthenticationPrincipal Jwt jwt, @PathVariable String id, @RequestParam UUID attemptId,
+                             @RequestParam(required = false) @Min(1) Integer revision) {
+        return guides.view(user(jwt), attemptId, id, revision);
     }
 
     @PutMapping("/{id}/completion")

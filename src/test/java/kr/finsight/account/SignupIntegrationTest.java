@@ -285,6 +285,21 @@ class SignupIntegrationTest {
                 .andExpect(jsonPath("$.state").value("AVAILABLE")).andReturn().getResponse().getContentAsString());
         var guideId = action.path("id").asString();
         var guideAttempt = action.path("attemptId").asString();
+        var revision = action.path("revision").asInt();
+        var view = "/api/v1/guides/" + guideId + "/view";
+        http.perform(post(view).param("attemptId", guideAttempt).param("revision", Integer.toString(revision))
+                        .header("Authorization", other))
+                .andExpect(status().isNotFound());
+        http.perform(post(view).param("attemptId", guideAttempt).param("revision", Integer.toString(revision + 1))
+                        .header("Authorization", owner))
+                .andExpect(status().isConflict());
+        assertEquals(0, db.sql("""
+                SELECT count(*) FROM guide_activity a JOIN survey_attempt s ON s.user_id=a.user_id
+                WHERE s.id=:attempt AND a.content_id=:guide
+                """).param("attempt", UUID.fromString(guideAttempt)).param("guide", guideId).query(Integer.class).single());
+        http.perform(post(view).param("attemptId", guideAttempt).param("revision", Integer.toString(revision))
+                        .header("Authorization", owner))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.guide.version").value(revision));
         var completion = "/api/v1/guides/" + guideId + "/completion";
         http.perform(put(completion).param("attemptId", guideAttempt).header("Authorization", owner)
                         .contentType("application/json").content("{\"completed\":true}"))

@@ -660,6 +660,18 @@ paths:
                   title: {type: [string, 'null']}
         '401': {description: 인증 필요}
         '409': {description: 서비스 데이터 삭제 처리 중}
+  /api/v1/guides/{id}/view:
+    post:
+      summary: 본인 진단의 공개 가이드 열람
+      security: [{appBearer: []}]
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string}}
+        - {in: query, name: attemptId, required: true, schema: {type: string, format: uuid}}
+        - {in: query, name: revision, schema: {type: integer, minimum: 1}, description: 위젯에 표시한 가이드 버전}
+      responses:
+        '200': {description: 공개 가이드와 월별 완료 상태}
+        '404': {description: 본인 진단 또는 해당 공개 가이드 없음}
+        '409': {description: 요청한 공개 버전이 바뀜}
   /api/v1/guides/{id}/completion:
     put:
       summary: 월별 가이드 실천 완료 상태 저장

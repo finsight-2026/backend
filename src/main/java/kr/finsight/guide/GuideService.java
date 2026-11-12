@@ -91,9 +91,9 @@ public class GuideService {
     }
 
     @Transactional
-    Detail view(UUID user, UUID attempt, String id) {
+    Detail view(UUID user, UUID attempt, String id, Integer revision) {
         var month = LocalDate.now(KST).withDayOfMonth(1);
-        var content = recordView(user, attempt, id, month);
+        var content = recordView(user, attempt, id, month, revision);
         var completed = db.sql("""
                 SELECT completed_at IS NOT NULL FROM guide_activity
                 WHERE user_id = :user AND content_id = :id AND month_start = :month
@@ -104,10 +104,7 @@ public class GuideService {
     @Transactional
     Detail complete(UUID user, UUID attempt, String id, boolean completed, Integer revision) {
         var month = LocalDate.now(KST).withDayOfMonth(1);
-        var content = recordView(user, attempt, id, month);
-        if (revision != null && content.version() != revision) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT);
-        }
+        var content = recordView(user, attempt, id, month, revision);
         db.sql("""
                 UPDATE guide_activity SET completed_at =
                     CASE WHEN :completed THEN clock_timestamp() ELSE NULL END,
@@ -119,11 +116,14 @@ public class GuideService {
         return new Detail(content, completed);
     }
 
-    private Content recordView(UUID user, UUID attempt, String id, LocalDate month) {
+    private Content recordView(UUID user, UUID attempt, String id, LocalDate month, Integer revision) {
         db.sql("SELECT id FROM app_user WHERE id = :user AND status = 'ACTIVE' FOR UPDATE")
                 .param("user", user).query(UUID.class).optional().orElseThrow(GuideService::missing);
         var diagnosis = diagnosis(user, attempt);
         var content = item(diagnosis.type(), id);
+        if (revision != null && content.version() != revision) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT);
+        }
         db.sql("""
                 INSERT INTO guide_activity(user_id,content_id,month_start,content_version,representative_type,title)
                 VALUES (:user,:id,:month,:version,:type,:title) ON CONFLICT DO NOTHING
