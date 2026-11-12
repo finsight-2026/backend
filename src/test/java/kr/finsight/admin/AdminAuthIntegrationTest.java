@@ -690,7 +690,8 @@ class AdminAuthIntegrationTest {
         db.sql("INSERT INTO admin_role(admin_id,role) VALUES (:id,'OPERATOR')")
                 .param("id", operator.admin().id()).update();
         var reviewer = noteAdmin("SUPER_ADMIN");
-        var now = java.time.OffsetDateTime.now();
+        // PostgreSQL stores timestamptz at microsecond precision.
+        var now = java.time.OffsetDateTime.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         var eligible = dashboardAccount(now, false, "ACTIVE");
         var optedOut = dashboardAccount(now, false, "ACTIVE");
         var capped = dashboardAccount(now, false, "ACTIVE");
