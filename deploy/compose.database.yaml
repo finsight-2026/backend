@@ -1,0 +1,24 @@
+name: finsight-data
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
+    restart: unless-stopped
+    mem_limit: 384m
+    env_file:
+      - database.env
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "work_mem=2MB", "-c", "max_connections=32"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-database.sql:/docker-entrypoint-initdb.d/10-finsight.sql:ro
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d finsight && pg_isready -U postgres -d finsight_staging"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+networks:
+  data:
+    name: finsight-data
+volumes:
+  postgres-data:

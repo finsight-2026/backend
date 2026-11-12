@@ -41,5 +41,6 @@ out/
 *.pem
 *.p8
 deploy/runtime.env
+deploy/database.env
 deploy/current-image*
 deploy/.deploy.lock

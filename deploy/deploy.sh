@@ -10,8 +10,8 @@ domain=$2
 image=$3
 
 case "$domain" in
-  api.finsight.life) environment=production; port=18080; memory=768m ;;
-  staging.finsight.life) environment=staging; port=18081; memory=512m ;;
+  api.finsight.life) environment=production; port=18080; memory=640m ;;
+  staging.finsight.life) environment=staging; port=18081; memory=448m ;;
   *) echo 'Invalid deployment domain' >&2; exit 2 ;;
 esac
 if [[ ! "$image" =~ ^ghcr\.io/finsight-2026/backend@sha256:[a-f0-9]{64}$ ]]; then
@@ -20,9 +20,9 @@ if [[ ! "$image" =~ ^ghcr\.io/finsight-2026/backend@sha256:[a-f0-9]{64}$ ]]; the
 fi
 
 cd "$directory"
-test -r runtime.env && test -r postgres-ca.pem && test -r compose.yaml
+test -r runtime.env && test -r compose.yaml
 umask 077
-exec 9>.deploy.lock
+exec 9>.release/deploy.lock
 flock -w 120 9
 
 export FINSIGHT_LOCAL_PORT=$port
@@ -30,9 +30,10 @@ export FINSIGHT_BACKEND_IMAGE=$image
 export FINSIGHT_BACKEND_MEMORY=$memory
 compose=(docker compose --project-name "finsight-$environment" -f compose.yaml)
 previous=''
-if [[ -f current-image ]]; then
-  read -r previous <current-image
-  if [[ ! "$previous" =~ ^ghcr\.io/finsight-2026/backend@sha256:[a-f0-9]{64}$ ]]; then
+if [[ -f .release/current-image ]]; then
+  read -r previous <.release/current-image
+  if [[ ! "$previous" =~ ^ghcr\.io/finsight-2026/backend@sha256:[a-f0-9]{64}$ \
+        && ! "$previous" =~ ^finsight-backend:bootstrap-[a-f0-9]{40}$ ]]; then
     echo 'The recorded release digest is invalid' >&2
     exit 1
   fi
@@ -49,8 +50,8 @@ check_https() {
 if "${compose[@]}" up -d --wait --wait-timeout 120 backend \
     && check_https /actuator/health \
     && check_https /api/v1/surveys/current; then
-  printf '%s\n' "$image" >current-image.new
-  mv -f current-image.new current-image
+  printf '%s\n' "$image" >.release/current-image.new
+  mv -f .release/current-image.new .release/current-image
   exit 0
 fi
 
