@@ -1,0 +1,13 @@
+(finsight_api) {
+    @admin path /api/v1/admin /api/v1/admin/*
+    respond @admin 404
+    reverse_proxy {args[0]}
+}
+
+api.finsight.life {
+    import finsight_api 127.0.0.1:18080
+}
+
+staging.finsight.life {
+    import finsight_api 127.0.0.1:18081
+}
