@@ -12,6 +12,14 @@
 
 운영과 스테이징은 서버에서 미리보기 약관을 비활성화한다. MailLink 연결 전에는 `FINSIGHT_MAIL_MODE=disabled`로 둔다. 인증번호와 비밀번호 재설정 요청에는 503을 반환한다. 정식 약관 버전과 운영 메일을 연결한 뒤 가입을 검증한다.
 
+## 사용자 인증 메일
+
+MailLink에 발신 주소를 등록하고 자동메일 템플릿 두 개를 승인받는다. 가입용 제목은 `[FINSIGHT] 이메일 인증번호`를 사용한다. 본문에 `[$_code_$]`와 유효기간 5분을 표시한다. 재설정용 제목은 `[FINSIGHT] 비밀번호 재설정`을 사용한다. 본문의 링크 목적지에 `[$_reset_link_$]`를 넣고 유효기간 15분과 본인이 요청하지 않았을 때의 안내를 표시한다. 승인된 템플릿별 `AU-숫자` 값을 `FINSIGHT_MAILLINK_SIGNUP_TEMPLATE`과 `FINSIGHT_MAILLINK_RESET_TEMPLATE`에 등록한다. MailLink는 수신 이메일 주소를 최대 60자로 제한한다. [자동메일 발송 API](https://www.maillink.co.kr/app/openapi/ag_sendautomail.jsp)
+
+배포 환경의 `runtime.env`에 앱 키와 시크릿을 등록하고, 테스트 수신자로 발송을 승인받은 환경에서만 `FINSIGHT_MAIL_MODE=maillink`로 바꾼다. 응답의 대기열 건수와 최종 도착 여부를 MailLink 콘솔에서 각각 확인한다. iOS 재설정은 운영 링크와 앱 연결이 준비된 기기에서 검증한다. 로컬 테스트에서는 기본 `local` 모드로 개발 메일함을 사용한다.
+
+재설정 링크의 호스트는 앱 Associated Domains와 같은 `finsight.life`다. 이 호스트에서 `/.well-known/apple-app-site-association`을 HTTPS로 직접 제공하고 서버의 `FINSIGHT_IOS_APP_ID`에 서명된 앱의 실제 `application-identifier`를 설정한다. 앱 연결과 비밀번호 재설정은 서명된 iPhone 빌드에서 인수한다. [Apple Associated Domains](https://developer.apple.com/documentation/xcode/supporting-associated-domains)
+
 ## 릴리스
 
 - `develop`과 `main` PR에서 테스트와 컨테이너 빌드를 실행한다. `develop` 반영 시 GHCR 이미지의 digest를 스테이징에 배포한다.

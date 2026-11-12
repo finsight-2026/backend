@@ -1582,6 +1582,35 @@ class SignupIntegrationTest {
     }
 
     @Test
+    void failedResetDeliveryKeepsExistingLinkAndReturnsTheSameResponseAsUnknownEmail() throws Exception {
+        var email = UUID.randomUUID() + "@example.test";
+        signup.send(email, "127.0.0.144");
+        assertEquals(SignupService.Outcome.CREATED, signup.register(registration(email, mail.code)));
+        var path = "/api/v1/auth/password-reset";
+        var request = post(path + "/request").contentType("application/json")
+                .content(json.writeValueAsString(Map.of("email", email)));
+        http.perform(request).andExpect(status().isAccepted());
+        var token = mail.resetLink.split("token=", 2)[1];
+        db.sql("""
+                UPDATE app_password_reset_request SET requested_at = requested_at - interval '61 seconds'
+                WHERE email_hash = :email
+                """).param("email", AppSessions.hash(email)).update();
+        mail.failReset = true;
+        try {
+            http.perform(request).andExpect(status().isAccepted()).andExpect(content().string(""));
+            http.perform(post(path + "/request").contentType("application/json")
+                            .content(json.writeValueAsString(Map.of("email", UUID.randomUUID() + "@example.test"))))
+                    .andExpect(status().isAccepted()).andExpect(content().string(""));
+            http.perform(request).andExpect(status().isTooManyRequests());
+        } finally {
+            mail.failReset = false;
+        }
+        http.perform(post(path + "/complete").contentType("application/json")
+                        .content(json.writeValueAsString(Map.of("token", token, "password", "Renewed123"))))
+                .andExpect(status().isNoContent());
+    }
+
+    @Test
     void accountSettingsKeepResearchHistoryAndIsolateProfileChanges() throws Exception {
         var auth = createAuthorization("127.0.0.45");
         var other = createAuthorization("127.0.0.46");
@@ -2303,9 +2332,11 @@ class SignupIntegrationTest {
     static class CapturedMail implements SignupMail, PasswordReset.Mail {
         private String code;
         private String resetLink;
+        private boolean failReset;
 
         @Override
         public void deliverReset(String email, String link) {
+            if (failReset) throw new MailDeliveryFailure();
             resetLink = link;
         }
 

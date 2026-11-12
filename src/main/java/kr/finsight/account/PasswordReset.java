@@ -69,11 +69,16 @@ class PasswordReset {
         var bytes = new byte[32];
         random.nextBytes(bytes);
         var token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        try {
+            mail.deliverReset(email, resetLink(appOrigin, linkOrigin, token));
+        } catch (MailDeliveryFailure error) {
+            // Keep the rate limit and existing link without exposing whether this address exists.
+            return true;
+        }
         db.sql("""
                 INSERT INTO app_password_reset VALUES (:user,:hash,:expires)
                 ON CONFLICT (user_id) DO UPDATE SET token_hash=excluded.token_hash, expires_at=excluded.expires_at
                 """).param("user", user.get()).param("hash", hash(token)).param("expires", now.plusMinutes(15)).update();
-        mail.deliverReset(email, resetLink(appOrigin, linkOrigin, token));
         return true;
     }
 
