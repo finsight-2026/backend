@@ -13,6 +13,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.util.Map;
 import java.util.UUID;
 import kr.finsight.TestcontainersConfiguration;
+import kr.finsight.comparison.ComparisonBuild;
+import kr.finsight.diagnosis.YfsiScoring;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -22,6 +24,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.test.web.servlet.MockMvc;
 import tools.jackson.databind.json.JsonMapper;
@@ -44,6 +47,7 @@ class SignupIntegrationTest {
     @Autowired WithdrawalService withdrawals;
     @Autowired WithdrawalJob withdrawalJob;
     @Autowired DataDeletionService dataDeletion;
+    @Autowired ComparisonBuild comparisonBuild;
     @Autowired AppDataExports exports;
     @Autowired kr.finsight.jobs.JobLeases exportLeases;
     @Autowired kr.finsight.media.MediaStore media;
@@ -1203,13 +1207,50 @@ class SignupIntegrationTest {
                         .content(json.writeValueAsString(Map.of("password", "Finsight123"))))
                 .andExpect(status().isNoContent());
         var pending = requestDeletion(owner);
-        http.perform(get(path).header("Authorization", viewer))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.reason").value("REBUILDING"))
+        http.perform(get(path).header("Authorization", viewer).header("If-None-Match", "\"previous-comparison\""))
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.available").value(false)).andExpect(jsonPath("$.reason").value("REBUILDING"))
                 .andExpect(jsonPath("$.metrics").doesNotExist());
         http.perform(get(insight).header("Authorization", viewer)).andExpect(status().isNotFound());
         http.perform(get("/api/v1/insights").header("Authorization", viewer))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.items.length()").value(0));
         assertTrue(dataDeletion.purge(pending));
+
+        db.sql("""
+                WITH cohort AS (
+                    INSERT INTO app_user(id,email,status)
+                    SELECT id,id || '@comparison-rebuild.example.test','ACTIVE' FROM (
+                        SELECT gen_random_uuid() id FROM generate_series(1,30)
+                    ) ids RETURNING id
+                ), attempts AS (
+                    INSERT INTO survey_attempt(id,user_id,survey_version,formula_version,started_at)
+                    SELECT gen_random_uuid(),id,'survey',:formula,now() FROM cohort RETURNING id
+                )
+                INSERT INTO diagnosis(id,attempt_id,completed_at,representative_type,score_snapshot)
+                SELECT gen_random_uuid(),id,now(),'DEBT','{"total":{"numerator":50,"denominator":1}}'
+                FROM attempts
+                """).param("formula", YfsiScoring.FORMULA_VERSION).update();
+        var replacement = comparisonBuild.request(admin, YfsiScoring.Pressure.DEBT, null, null, YfsiScoring.FORMULA_VERSION);
+        assertTrue(ReflectionTestUtils.<Boolean>invokeMethod(comparisonBuild, "processNext"));
+        var rebuilt = comparisonBuild.get(replacement.id());
+        assertEquals(ComparisonBuild.Status.READY, rebuilt.status());
+        assertTrue(rebuilt.sampleSize() >= 30);
+        assertTrue(rebuilt.metrics().path("YFSI_MEAN").path("n").asInt() >= 30);
+        assertEquals(0L, db.sql("SELECT count(*) FROM comparison_publication WHERE snapshot_id=:id")
+                .param("id", rebuilt.id()).query(Long.class).single());
+        assertEquals("INVALIDATED", db.sql("SELECT status FROM comparison_snapshot WHERE id=:id")
+                .param("id", snapshot).query(String.class).single());
+        assertFalse(db.sql("SELECT EXISTS(SELECT 1 FROM comparison_publication WHERE type='DEBT' AND status='ACTIVE')")
+                .query(Boolean.class).single());
+        http.perform(get(path).header("Authorization", viewer))
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.available").value(false)).andExpect(jsonPath("$.reason").value("REBUILDING"))
+                .andExpect(jsonPath("$.metrics").doesNotExist());
+        http.perform(get(insight).header("Authorization", viewer)).andExpect(status().isNotFound());
+
+        db.sql("DELETE FROM comparison_snapshot WHERE id=:id").param("id", rebuilt.id()).update();
+        db.sql("DELETE FROM app_user WHERE email LIKE '%@comparison-rebuild.example.test'").update();
+
         http.perform(post("/api/v1/account/reauth").header("Authorization", viewer).contentType("application/json")
                         .content(json.writeValueAsString(Map.of("password", "Finsight123")))).andExpect(status().isNoContent());
         requestAndPurge(viewer);
