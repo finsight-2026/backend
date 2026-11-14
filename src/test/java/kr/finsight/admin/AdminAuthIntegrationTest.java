@@ -1444,6 +1444,7 @@ class AdminAuthIntegrationTest {
     }
 
     @Test
+    @org.springframework.test.annotation.DirtiesContext(methodMode = org.springframework.test.annotation.DirtiesContext.MethodMode.AFTER_METHOD)
     void aggregateExportRecoversAfterPostgresRejectsArchiveWrite() {
         var actor = noteAdmin("ANALYST");
         db.sql("INSERT INTO admin_role VALUES (:id,'ANALYST')").param("id", actor.admin().id()).update();
