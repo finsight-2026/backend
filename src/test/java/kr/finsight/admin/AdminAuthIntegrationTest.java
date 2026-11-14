@@ -35,6 +35,7 @@ class AdminAuthIntegrationTest {
     private static final String ORIGIN = "https://localhost:18443";
     private static final String SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
     @Autowired AdminAuth auth;
+    @Autowired AdminAccounts accounts;
     @Autowired AdminTotp totp;
     @Autowired JdbcClient db;
     @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
@@ -460,6 +461,19 @@ class AdminAuthIntegrationTest {
         assertFalse(java.util.Arrays.equals(reason.getBytes(java.nio.charset.StandardCharsets.UTF_8), encrypted));
         assertEquals(2, db.sql("SELECT count(*) FROM audit_log WHERE target_id=:id AND action='PII_VIEWED'")
                 .param("id", user.toString()).query(Integer.class).single());
+        db.sql("""
+                ALTER TABLE audit_log ADD CONSTRAINT test_reject_pii_view_audit
+                    CHECK (action <> 'PII_VIEWED') NOT VALID
+                """).update();
+        jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            var savepoint = connection.setSavepoint();
+            var failure = assertThrows(jakarta.servlet.ServletException.class,
+                    () -> http.perform(get(root + "/pii").cookie(session).param("grantId", grant)));
+            var cause = assertInstanceOf(org.springframework.dao.DataIntegrityViolationException.class, failure.getCause());
+            assertTrue(cause.getMostSpecificCause().getMessage().contains("test_reject_pii_view_audit"));
+            connection.rollback(savepoint);
+            return null;
+        });
         db.sql("UPDATE pii_grant SET expires_at=clock_timestamp()-interval '1 second' WHERE id=:id")
                 .param("id", UUID.fromString(grant)).update();
         http.perform(get(root + "/pii").cookie(session).param("grantId", grant)).andExpect(status().isForbidden());
@@ -685,6 +699,38 @@ class AdminAuthIntegrationTest {
                     .param("id", preview.previewId()).query(Boolean.class).single());
             assertEquals(0, db.sql("SELECT count(*) FROM campaign_job WHERE campaign_id=:id")
                     .param("id", campaign.id()).query(Integer.class).single());
+            return null;
+        }));
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void auditWriteFailureRollsBackAdminRoleChangeAndSessionRevocation() throws Exception {
+        var supervisor = noteAdmin("SUPER_ADMIN");
+        var supervisorSession = monitorSession(supervisor);
+        var operator = noteAdmin("OPERATOR");
+        var operatorSession = monitorSession(operator);
+        var operatorId = operator.admin().id();
+        var before = accounts.list(supervisor).stream().filter(item -> item.id().equals(operatorId))
+                .findFirst().orElseThrow();
+        var change = new AdminAccounts.Change(java.util.List.of(AdminAccounts.Role.PRIVACY), null,
+                before.version(), "감사 저장 실패 시 관리자 역할 변경을 취소합니다");
+
+        db.sql("""
+                ALTER TABLE audit_log ADD CONSTRAINT test_reject_admin_role_audit
+                    CHECK (action <> 'ADMIN_ACCOUNT_UPDATED') NOT VALID
+                """).update();
+        transactions.executeWithoutResult(tx -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            var savepoint = connection.setSavepoint();
+            var failure = assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+                    () -> accounts.update(supervisor, supervisorSession.getValue(), operatorId, change));
+            assertTrue(failure.getMostSpecificCause().getMessage().contains("test_reject_admin_role_audit"));
+            assertTrue(tx.isRollbackOnly());
+            connection.rollback(savepoint);
+            var after = accounts.list(supervisor).stream().filter(item -> item.id().equals(operatorId))
+                    .findFirst().orElseThrow();
+            assertEquals(before, after);
+            assertEquals(operator, auth.identity(operatorSession.getValue()));
             return null;
         }));
     }
