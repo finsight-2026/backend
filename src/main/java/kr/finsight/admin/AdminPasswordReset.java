@@ -121,7 +121,7 @@ class AdminPasswordReset {
                 var token = new String(encryption.decrypt(delivery.encrypted()), StandardCharsets.US_ASCII);
                 mail.deliverAdminPasswordReset(delivery.email(), origin + "/#admin-password-reset=" + token);
             } catch (RuntimeException failure) {
-                LOG.warn("로컬 관리자 재설정 메일 기록 실패 {}", delivery.id());
+                LOG.warn("관리자 비밀번호 재설정 메일 전달 실패 {}", delivery.id());
                 db.sql("UPDATE admin_password_reset SET next_delivery_at=clock_timestamp()+interval '30 seconds' WHERE admin_id=:id")
                         .param("id", delivery.id()).update();
                 return;

@@ -6,6 +6,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -35,25 +36,36 @@ class MailLinkOutboundMail implements SignupMail, PasswordReset.Mail, AdminInvit
     private final String appSecret;
     private final String signupTemplate;
     private final String resetTemplate;
+    private final String adminInvitationTemplate;
+    private final String adminResetTemplate;
 
     @Autowired
     MailLinkOutboundMail(JsonMapper json,
                          @Value("${FINSIGHT_MAILLINK_APP_KEY:}") String appKey,
                          @Value("${FINSIGHT_MAILLINK_APP_SECRET:}") String appSecret,
                          @Value("${FINSIGHT_MAILLINK_SIGNUP_TEMPLATE:}") String signupTemplate,
-                         @Value("${FINSIGHT_MAILLINK_RESET_TEMPLATE:}") String resetTemplate) {
+                         @Value("${FINSIGHT_MAILLINK_RESET_TEMPLATE:}") String resetTemplate,
+                         @Value("${FINSIGHT_MAILLINK_ADMIN_INVITATION_TEMPLATE:}") String adminInvitationTemplate,
+                         @Value("${FINSIGHT_MAILLINK_ADMIN_RESET_TEMPLATE:}") String adminResetTemplate) {
         this(HttpClient.newBuilder().connectTimeout(TIMEOUT).build(), json, ORIGIN,
-                appKey, appSecret, signupTemplate, resetTemplate);
+                appKey, appSecret, signupTemplate, resetTemplate, adminInvitationTemplate, adminResetTemplate);
     }
 
     MailLinkOutboundMail(HttpClient http, JsonMapper json, URI origin, String appKey, String appSecret,
-                         String signupTemplate, String resetTemplate) {
+                         String signupTemplate, String resetTemplate, String adminInvitationTemplate,
+                         String adminResetTemplate) {
         if (appKey.isBlank() || appSecret.isBlank()) {
             throw new IllegalArgumentException("MailLink 앱 키와 시크릿이 필요합니다.");
         }
         if (!signupTemplate.matches("AU-[0-9]+") || !resetTemplate.matches("AU-[0-9]+")
                 || signupTemplate.equals(resetTemplate)) {
             throw new IllegalArgumentException("가입과 재설정에 각각 MailLink 자동메일 템플릿 ID가 필요합니다.");
+        }
+        var templates = new HashSet<>(List.of(signupTemplate, resetTemplate));
+        for (String template : List.of(adminInvitationTemplate, adminResetTemplate)) {
+            if (!template.isBlank() && (!template.matches("AU-[0-9]+") || !templates.add(template))) {
+                throw new IllegalArgumentException("관리자 초대와 재설정에는 각각 고유한 MailLink 자동메일 템플릿 ID가 필요합니다.");
+            }
         }
         this.http = http;
         this.json = json;
@@ -62,6 +74,8 @@ class MailLinkOutboundMail implements SignupMail, PasswordReset.Mail, AdminInvit
         this.appSecret = appSecret;
         this.signupTemplate = signupTemplate;
         this.resetTemplate = resetTemplate;
+        this.adminInvitationTemplate = adminInvitationTemplate;
+        this.adminResetTemplate = adminResetTemplate;
     }
 
     @Override
@@ -80,12 +94,14 @@ class MailLinkOutboundMail implements SignupMail, PasswordReset.Mail, AdminInvit
 
     @Override
     public void deliverAdminInvitation(String email, String link) {
-        throw new MailDeliveryFailure();
+        if (adminInvitationTemplate.isBlank() || email.length() > 60) throw new MailDeliveryFailure();
+        send(adminInvitationTemplate, email, "invitation_link", link);
     }
 
     @Override
     public void deliverAdminPasswordReset(String email, String link) {
-        throw new MailDeliveryFailure();
+        if (adminResetTemplate.isBlank() || email.length() > 60) throw new MailDeliveryFailure();
+        send(adminResetTemplate, email, "reset_link", link);
     }
 
     private void send(String template, String email, String variable, String value) {

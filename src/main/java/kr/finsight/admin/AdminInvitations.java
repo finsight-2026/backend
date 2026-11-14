@@ -73,7 +73,7 @@ class AdminInvitations {
                 try {
                     mail.deliverAdminInvitation(email, origin + "/#admin-invitation=" + token);
                 } catch (RuntimeException failure) {
-                    LOG.warn("로컬 관리자 초대함 저장 실패 {}", admin);
+                    LOG.warn("관리자 초대 메일 전달 실패 {}", admin);
                 }
             }
         });

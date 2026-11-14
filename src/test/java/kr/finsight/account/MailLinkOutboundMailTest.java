@@ -45,7 +45,7 @@ class MailLinkOutboundMailTest {
         server.start();
         var origin = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
         mail = new MailLinkOutboundMail(HttpClient.newHttpClient(), json, origin,
-                "fixture-key", "fixture-secret", "AU-100", "AU-101");
+                "fixture-key", "fixture-secret", "AU-100", "AU-101", "AU-102", "AU-103");
     }
 
     @AfterEach
@@ -67,6 +67,30 @@ class MailLinkOutboundMailTest {
                 "https://finsight.life/password-reset#token=fixture");
         assertNotEquals(requests.get(1).body().path("list").get(0).path("data_key").asString(),
                 requests.get(3).body().path("list").get(0).path("data_key").asString());
+    }
+
+    @Test
+    void sendsAdminLinksWithDedicatedTemplates() {
+        var invite = "https://admin.finsight.life/#admin-invitation=fixture";
+        var reset = "https://admin.finsight.life/#admin-password-reset=fixture";
+        mail.deliverAdminInvitation("invite@example.test", invite);
+        mail.deliverAdminPasswordReset("reset@example.test", reset);
+        assertEquals(4, requests.size());
+        assertRecipient(requests.get(1), "AU-102", "invite@example.test", "invitation_link", invite);
+        assertRecipient(requests.get(3), "AU-103", "reset@example.test", "reset_link", reset);
+    }
+
+    @Test
+    void disabledOrReusedAdminTemplatesDoNotSendMail() {
+        var http = HttpClient.newHttpClient();
+        var origin = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+        assertThrows(IllegalArgumentException.class, () -> new MailLinkOutboundMail(http, json, origin,
+                "fixture-key", "fixture-secret", "AU-100", "AU-101", "AU-101", ""));
+        var disabled = new MailLinkOutboundMail(http, json, origin,
+                "fixture-key", "fixture-secret", "AU-100", "AU-101", "", "");
+        assertThrows(MailDeliveryFailure.class, () -> disabled.deliverAdminInvitation("invite@example.test", "unused"));
+        assertThrows(MailDeliveryFailure.class, () -> disabled.deliverAdminPasswordReset("reset@example.test", "unused"));
+        assertTrue(requests.isEmpty());
     }
 
     @Test
