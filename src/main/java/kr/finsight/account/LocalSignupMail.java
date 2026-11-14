@@ -34,6 +34,11 @@ class LocalSignupMail implements SignupMail, PasswordReset.Mail, AdminInvitation
     }
 
     @Override
+    public void requireAdminInvitationAvailable(String email) {
+        // The local mailbox accepts the same addresses as the administrator account form.
+    }
+
+    @Override
     public void deliverAdminInvitation(String email, String link) {
         write("admin-invitation-", email, link);
     }

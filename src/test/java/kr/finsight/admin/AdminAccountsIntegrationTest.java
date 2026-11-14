@@ -47,6 +47,7 @@ class AdminAccountsIntegrationTest {
     @Autowired AdminAuth auth;
     @Autowired AdminAccounts accounts;
     @Autowired AdminPasswordReset resets;
+    @org.springframework.test.context.bean.override.mockito.MockitoSpyBean AdminInvitationMail invitationMail;
     @Autowired MockMvc http;
     @Autowired JdbcClient db;
     @Autowired JsonMapper json;
@@ -132,6 +133,13 @@ class AdminAccountsIntegrationTest {
                 "expectedVersion", 1, "reason", REASON)).andExpect(status().isOk()).andExpect(jsonPath("$.version").value(2));
         http.perform(get(API + "/auth/me").cookie(firstSession)).andExpect(status().isUnauthorized());
         var secondSession = recoveryLogin("operator@example.test", codes.get(1).asString());
+        org.mockito.Mockito.doThrow(new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE))
+                .when(invitationMail).requireAdminInvitationAvailable("operator@example.test");
+        body(write("POST", "/admins/" + operator + "/mfa-reset", root), Map.of("reason", REASON))
+                .andExpect(status().isServiceUnavailable());
+        http.perform(get(API + "/auth/me").cookie(secondSession)).andExpect(status().isOk());
+        org.mockito.Mockito.doCallRealMethod().when(invitationMail).requireAdminInvitationAvailable("operator@example.test");
         body(write("POST", "/admins/" + operator + "/mfa-reset", root), Map.of("reason", REASON))
                 .andExpect(status().isAccepted());
         http.perform(get(API + "/auth/me").cookie(secondSession)).andExpect(status().isUnauthorized());

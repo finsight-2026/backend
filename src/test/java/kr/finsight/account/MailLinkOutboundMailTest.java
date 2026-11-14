@@ -88,6 +88,9 @@ class MailLinkOutboundMailTest {
                 "fixture-key", "fixture-secret", "AU-100", "AU-101", "AU-101", ""));
         var disabled = new MailLinkOutboundMail(http, json, origin,
                 "fixture-key", "fixture-secret", "AU-100", "AU-101", "", "");
+        var unavailable = assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> disabled.requireAdminInvitationAvailable("invite@example.test"));
+        assertEquals(503, unavailable.getStatusCode().value());
         assertThrows(MailDeliveryFailure.class, () -> disabled.deliverAdminInvitation("invite@example.test", "unused"));
         assertThrows(MailDeliveryFailure.class, () -> disabled.deliverAdminPasswordReset("reset@example.test", "unused"));
         assertTrue(requests.isEmpty());

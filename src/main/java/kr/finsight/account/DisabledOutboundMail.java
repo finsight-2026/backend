@@ -27,6 +27,11 @@ class DisabledOutboundMail implements SignupMail, PasswordReset.Mail, AdminInvit
     }
 
     @Override
+    public void requireAdminInvitationAvailable(String email) {
+        requireAvailable();
+    }
+
+    @Override
     public void deliverAdminInvitation(String email, String link) {
         requireAvailable();
     }

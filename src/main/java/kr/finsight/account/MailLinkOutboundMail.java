@@ -93,6 +93,12 @@ class MailLinkOutboundMail implements SignupMail, PasswordReset.Mail, AdminInvit
     }
 
     @Override
+    public void requireAdminInvitationAvailable(String email) {
+        if (adminInvitationTemplate.isBlank()) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
+        if (email.length() > 60) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    @Override
     public void deliverAdminInvitation(String email, String link) {
         if (adminInvitationTemplate.isBlank() || email.length() > 60) throw new MailDeliveryFailure();
         send(adminInvitationTemplate, email, "invitation_link", link);

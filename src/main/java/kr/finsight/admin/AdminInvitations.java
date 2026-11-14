@@ -58,6 +58,7 @@ class AdminInvitations {
     }
 
     Receipt issue(UUID admin, String email, Purpose purpose) {
+        mail.requireAdminInvitationAvailable(email);
         revoke(admin);
         var raw = new byte[32];
         RANDOM.nextBytes(raw);
