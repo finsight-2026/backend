@@ -1420,15 +1420,25 @@ class AdminAuthIntegrationTest {
         var abandoned = jobLeases.acquire(AdminDashboardExports.QUEUE, job.id()).orElseThrow();
         dashboardExports.process(job.id());
         http.perform(get(path).cookie(session)).andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("RUNNING")).andExpect(jsonPath("$.startedAt").isString());
+                .andExpect(jsonPath("$.status").value("RUNNING")).andExpect(jsonPath("$.startedAt").isString())
+                .andExpect(jsonPath("$.processed").value(0)).andExpect(jsonPath("$.total").value(1));
         http.perform(get("/api/v1/admin/jobs").param("status", "RUNNING").cookie(session))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.items[0].id").value(job.id().toString()));
         db.sql("UPDATE job_execution_lease SET expires_at=clock_timestamp()-interval '1 second' WHERE job_id=:id")
                 .param("id", job.id()).update();
         assertFalse(jobLeases.lockOwned(abandoned));
         dashboardExports.process(job.id());
+        var completed = http.perform(get(path).cookie(session)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.completedAt").isString());
+        var completedAt = read(completed, "completedAt");
+        dashboardExports.process(job.id());
         http.perform(get(path).cookie(session)).andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("COMPLETED")).andExpect(jsonPath("$.retryCount").value(0));
+                .andExpect(jsonPath("$.status").value("COMPLETED")).andExpect(jsonPath("$.retryCount").value(0))
+                .andExpect(jsonPath("$.processed").value(1)).andExpect(jsonPath("$.total").value(1))
+                .andExpect(jsonPath("$.completedAt").value(completedAt));
+        http.perform(get("/api/v1/admin/jobs").param("status", "COMPLETED").cookie(session))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.items[0].id").value(job.id().toString()))
+                .andExpect(jsonPath("$.items[0].processed").value(1)).andExpect(jsonPath("$.items[0].total").value(1));
         assertEquals(1, db.sql("SELECT count(*) FROM admin_dashboard_export WHERE id=:id AND archive IS NOT NULL")
                 .param("id", job.id()).query(Integer.class).single());
     }
