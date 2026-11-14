@@ -100,7 +100,7 @@ class AdminUsers {
         var parameters = query.parameters();
         long total = db.sql("SELECT count(*) " + source).params(parameters).query(Long.class).single();
         var items = db.sql("SELECT " + USER_COLUMNS + source + """
-                ORDER BY latest.completed_at DESC NULLS LAST, u.id
+                ORDER BY latest.completed_at DESC NULLS LAST, u.id DESC
                 LIMIT :size OFFSET :offset
                 """).params(parameters).param("size", filters.size())
                 .param("offset", (long) (filters.page() - 1) * filters.size())
@@ -142,7 +142,7 @@ class AdminUsers {
         return db.sql("SELECT " + USER_COLUMNS + USER_SOURCE + """
                 JOIN admin_masked_export_user e ON e.user_id=u.id AND e.data_epoch=u.content_event_epoch
                 WHERE e.export_id=:id AND u.status<>'DATA_DELETION_PENDING'
-                ORDER BY latest.completed_at DESC NULLS LAST,u.id
+                ORDER BY latest.completed_at DESC NULLS LAST,u.id DESC
                 """).param("id", id).query(AdminUsers::user).list();
     }
 
