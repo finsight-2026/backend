@@ -959,6 +959,56 @@ class AdminAuthIntegrationTest {
                 () -> campaignDispatch.retryDevices(operator, first.id(), "repeat", "다시 점검", retryAt)).getStatusCode().value());
     }
 
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void scheduledCampaignUsesSavedSegmentAndRechecksLiveEligibility() {
+        var operator = noteAdmin("OPERATOR");
+        db.sql("INSERT INTO admin_role VALUES (:id,'OPERATOR')").param("id", operator.admin().id()).update();
+        var reviewer = noteAdmin("SUPER_ADMIN");
+        var now = java.time.OffsetDateTime.now();
+        var eligible = dashboardAccount(now, false, "ACTIVE");
+        var optedOut = dashboardAccount(now, false, "ACTIVE");
+        var withdrawing = dashboardAccount(now, false, "ACTIVE");
+        var changed = dashboardAccount(now, false, "ACTIVE");
+        var newRevisionOnly = dashboardAccount(now, false, "ACTIVE");
+        var originalTag = tags.create(operator, "예약 당시 대상");
+        var updatedTag = tags.create(operator, "예약 이후 신규 조건");
+        for (var user : java.util.List.of(eligible, optedOut, withdrawing, changed, newRevisionOnly)) {
+            db.sql("INSERT INTO app_notification_preference(user_id,enabled) VALUES (:user,true)")
+                    .param("user", user).update();
+            db.sql("INSERT INTO user_tag VALUES (:user,:tag)").param("user", user)
+                    .param("tag", user.equals(newRevisionOnly) ? updatedTag.id() : originalTag.id()).update();
+        }
+        var segment = segments.create(operator, new AdminSegments.Fields("예약 대상", "",
+                new AdminSegments.Conditions(null, null, null, null, null, null, null, java.util.List.of(originalTag.id()))));
+        var draft = notices.draft(operator, null, null, new AdminNotices.Fields("서비스 점검", "안내", "서비스 점검 안내입니다.", 0));
+        var review = noticeTransition(operator, draft, AdminNotices.Action.SUBMIT, null, null, false);
+        var approved = noticeTransition(reviewer, review, AdminNotices.Action.APPROVE, null, null, false);
+        var published = noticeTransition(reviewer, approved, AdminNotices.Action.PUBLISH, null, null, true);
+        var execution = AdminCampaigns.executionTime(now.plusDays(1), null);
+        var campaign = campaigns.create(operator, new AdminCampaigns.Fields("예약 검증", segment.id(), segment.definitionVersion(),
+                null, AdminCampaigns.TEMPLATE, published.revisionId(), execution));
+        var preview = campaigns.preview(operator, campaign.id(), campaign.version());
+        assertEquals(4, preview.counts().localEligible());
+        assertEquals(0, db.sql("SELECT count(*) FROM campaign_job WHERE campaign_id=:id")
+                .param("id", campaign.id()).query(Integer.class).single());
+        campaigns.confirm(operator, campaign.id(), preview.previewId(), campaign.version());
+
+        var edited = segments.update(operator, segment.id(), new AdminSegments.Fields("새 예약 대상", "",
+                new AdminSegments.Conditions(null, null, null, null, null, null, null, java.util.List.of(updatedTag.id()))), segment.version());
+        assertEquals(segment.definitionVersion() + 1, edited.definitionVersion());
+        db.sql("UPDATE app_notification_preference SET enabled=false WHERE user_id=:user").param("user", optedOut).update();
+        db.sql("UPDATE app_user SET status='WITHDRAWAL_PENDING' WHERE id=:user").param("user", withdrawing).update();
+        db.sql("DELETE FROM user_tag WHERE user_id=:user AND tag_id=:tag").param("user", changed).param("tag", originalTag.id()).update();
+
+        campaignDispatch.run(campaign.id(), execution);
+        assertEquals(segment.definitionVersion(), campaigns.find(campaign.id()).segmentVersion());
+        var delivered = db.sql("SELECT user_id FROM app_notification WHERE kind='NOTICE' AND event_key=:revision")
+                .param("revision", published.revisionId().toString()).query(UUID.class).list();
+        assertEquals(java.util.List.of(eligible), delivered);
+        assertEquals(Map.of("OPTED_OUT", 1L, "WITHDRAWAL_PENDING", 1L), campaignDispatch.deliveries(campaign.id(), null).reasons());
+    }
+
     private UUID registerCampaignDevice(UUID user, java.time.OffsetDateTime expiry) {
         var device = UUID.randomUUID();
         db.sql("INSERT INTO app_session(id,user_id,refresh_hash,expires_at) VALUES (:device,:user,:hash,:expires)")
