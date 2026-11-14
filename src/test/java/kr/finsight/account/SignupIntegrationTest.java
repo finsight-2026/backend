@@ -1384,6 +1384,36 @@ class SignupIntegrationTest {
         assertNull(news.lookup(due.articleId(), due.revision()).publishedRevision());
     }
 
+    @Test
+    void newsFeedRetainsOriginalPublicationTimeWhenTodaysEditionIsEmpty() throws Exception {
+        var auth = createAuthorization("127.0.0.73");
+        var actor = UUID.randomUUID();
+        db.sql("""
+                INSERT INTO admin_account(id,email,name,password_hash,totp_secret_encrypted,status)
+                VALUES (:id,:email,'fixture','test',decode('00','hex'),'ACTIVE')
+                """).param("id", actor).param("email", actor + "@example.test").update();
+        var yesterday = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).minusDays(1);
+        var publishedAt = yesterday.atTime(6, 30).atOffset(java.time.ZoneOffset.ofHours(9));
+        var type = kr.finsight.diagnosis.YfsiScoring.Pressure.FUTURE;
+        var draft = news.draft(actor, null, new kr.finsight.news.NewsEditorial.Draft(
+                "https://www.hankyung.com/article/8754323", "이전 편성 기사", "요약", "본문", "관련 이유", "작은 행동",
+                publishedAt, java.util.List.of(type)));
+        var published = changeNews(actor, approveNews(actor, draft), kr.finsight.news.NewsEditorial.Action.PUBLISH, null, null);
+        db.sql("""
+                INSERT INTO news_edition_item(edition_date,type,slot,article_id,article_revision)
+                VALUES (:day,:type,1,:article,:revision)
+                """).param("day", yesterday).param("type", type.name()).param("article", published.id())
+                .param("revision", published.revision()).update();
+
+        var response = http.perform(get("/api/v1/news").header("Authorization", auth))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.preparing").value(true))
+                .andExpect(jsonPath("$.articles.length()").value(1))
+                .andExpect(jsonPath("$.articles[0].id").value(published.id().toString()))
+                .andExpect(jsonPath("$.articles[0].editionDate").value(yesterday.toString())).andReturn();
+        var article = json.readTree(response.getResponse().getContentAsString()).path("articles").get(0);
+        assertEquals(publishedAt.toInstant(), java.time.OffsetDateTime.parse(article.path("articlePublishedAt").asString()).toInstant());
+    }
+
     private kr.finsight.news.NewsEditorial.Article approveNews(UUID actor, kr.finsight.news.NewsEditorial.Article draft) {
         var review = changeNews(actor, draft, kr.finsight.news.NewsEditorial.Action.SUBMIT, null, null);
         return changeNews(actor, review, kr.finsight.news.NewsEditorial.Action.APPROVE, null, null);
