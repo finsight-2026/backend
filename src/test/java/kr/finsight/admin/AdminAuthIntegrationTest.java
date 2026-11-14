@@ -685,8 +685,9 @@ class AdminAuthIntegrationTest {
 
     @Test
     @org.springframework.transaction.annotation.Transactional
-    void filteredCampaignDraftPinsUsersAndRejectsChangedTargets() {
+    void filteredCampaignDraftPinsUsersAndRejectsChangedTargets() throws Exception {
         var operator = noteAdmin("OPERATOR");
+        var session = monitorSession(operator);
         var reviewer = noteAdmin("SUPER_ADMIN");
         var now = java.time.OffsetDateTime.now();
         var day = now.atZoneSameInstant(AdminUsers.KST).toLocalDate();
@@ -697,6 +698,13 @@ class AdminAuthIntegrationTest {
             db.sql("INSERT INTO user_tag VALUES (:user,:tag)").param("user", user).param("tag", tag.id()).update();
         }
         var filters = new AdminUsers.Filters(null, null, null, null, null, tag.id(), day, day, true, 1, 20);
+        var csrf = http.perform(get(PATH + "/csrf").secure(true)).andExpect(status().isOk()).andReturn();
+        var csrfBody = json.readTree(csrf.getResponse().getContentAsString());
+        postJson(post("/api/v1/admin/campaigns/target-preview").secure(true).header("Origin", ORIGIN)
+                .cookie(csrf.getResponse().getCookie("__Secure-FINSIGHT_ADMIN_CSRF"), session)
+                .header(csrfBody.get("headerName").asString(), csrfBody.get("token").asString())
+                .contentType("application/json"), Map.of("tagId", tag.id()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(0));
         var preview = campaignTargets.preview(operator.admin().id(), filters);
         assertEquals(2, preview.total());
         assertEquals(1, preview.eligible());

@@ -22,10 +22,10 @@ class AdminBulkTagsController {
     private final AdminBulkTags bulk;
 
     record Filter(UUID userId, UUID diagnosisId, YfsiScoring.Pressure type, String age, AdminUsers.Status status,
-                  UUID tagId, LocalDate from, LocalDate to, boolean includeNoDiagnosis) {
+                  UUID tagId, LocalDate from, LocalDate to, Boolean includeNoDiagnosis) {
         AdminUsers.Filters toFilters() {
             return AdminUsersController.filters(userId, diagnosisId, type, age, status, tagId,
-                    from, to, includeNoDiagnosis, 1, 20);
+                    from, to, Boolean.TRUE.equals(includeNoDiagnosis), 1, 20);
         }
     }
     record PreviewInput(Filter filter, List<UUID> userIds, AdminBulkTags.Action action, List<UUID> tagIds) {}
