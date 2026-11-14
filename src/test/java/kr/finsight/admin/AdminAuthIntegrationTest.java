@@ -229,6 +229,36 @@ class AdminAuthIntegrationTest {
         assertNull(questions.get(1).averageActiveMs());
     }
 
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void questionStatsClassifyIncompleteAttemptsAtTheTwentyFourHourBoundary() {
+        var now = db.sql("SELECT now()").query(java.time.OffsetDateTime.class).single();
+        var cutoff = now.minusHours(24);
+        var user = dashboardAccount(cutoff.minusSeconds(2), false, "ACTIVE");
+        var expired = dashboardAttempt(user, cutoff);
+        var stillOpen = dashboardAttempt(user, cutoff.plusNanos(1_000));
+        for (var attempt : java.util.List.of(expired, stillOpen)) {
+            db.sql("UPDATE survey_attempt SET survey_version=:version WHERE id=:id")
+                    .param("version", kr.finsight.diagnosis.SurveyCatalog.SURVEY_VERSION).param("id", attempt).update();
+        }
+        questionEvent(expired, 2, "VIEWED", null, now);
+        questionEvent(expired, 3, "VIEWED", null, now.plusNanos(1_000));
+        questionEvent(expired, 1, "VIEWED", null, now.minusHours(1));
+        questionEvent(stillOpen, 4, "VIEWED", null, now.minusHours(1));
+
+        var from = cutoff.atZoneSameInstant(AdminUsers.KST).toLocalDate();
+        var to = now.atZoneSameInstant(AdminUsers.KST).toLocalDate();
+        var questions = funnel.questions(from, to);
+        assertEquals(1, questions.get(0).reached());
+        assertEquals(0, questions.get(0).dropped());
+        assertEquals(1, questions.get(1).reached());
+        assertEquals(1, questions.get(1).dropped());
+        assertEquals(0, questions.get(2).reached());
+        assertEquals(1, questions.get(3).reached());
+        assertEquals(0, questions.get(3).dropped());
+        assertTrue(questions.stream().allMatch(question -> question.distribution().stream().allMatch(count -> count == 0)));
+    }
+
     private void questionEvent(UUID attempt, int question, String kind, Integer active, java.time.OffsetDateTime time) {
         db.sql("""
                 INSERT INTO diagnosis_question_event(id,attempt_id,question_no,kind,active_ms,recorded_at)
