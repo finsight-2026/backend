@@ -876,22 +876,31 @@ class AdminAuthIntegrationTest {
         var eligible = dashboardAccount(now, false, "ACTIVE");
         var optedOut = dashboardAccount(now, false, "ACTIVE");
         var capped = dashboardAccount(now, false, "ACTIVE");
+        var reminder = dashboardAccount(now, false, "ACTIVE");
         db.sql("""
-                INSERT INTO app_notification_preference(user_id,enabled) VALUES (:first,true),(:second,true),(:third,true)
-                """).param("first", eligible).param("second", optedOut).param("third", capped).update();
+                INSERT INTO app_notification_preference(user_id,enabled,incomplete)
+                VALUES (:first,true,false),(:second,true,false),(:third,true,false),(:reminder,true,true)
+                """).param("first", eligible).param("second", optedOut).param("third", capped).param("reminder", reminder).update();
         var draft = notices.draft(creator, null, null,
                 new AdminNotices.Fields("서비스 점검", "점검 안내", "서비스를 점검합니다.", 0));
         var submitted = noticeTransition(creator, draft, AdminNotices.Action.SUBMIT, null, null, false);
         var approved = noticeTransition(reviewer, submitted, AdminNotices.Action.APPROVE, null, null, false);
         noticeTransition(reviewer, approved, AdminNotices.Action.PUBLISH, null, null, true);
         var scheduled = AdminCampaigns.executionTime(now.plusDays(1), null);
-        var input = new AdminCampaigns.Fields("서비스 점검", null, null, java.util.List.of(eligible, optedOut, capped),
+        var evening = scheduled.atZoneSameInstant(AdminUsers.KST).toLocalDate()
+                .atTime(20, 0).atZone(AdminUsers.KST).toOffsetDateTime();
+        db.sql("""
+                INSERT INTO survey_attempt(id,user_id,survey_version,formula_version,started_at,aborted_at,last_question)
+                VALUES (gen_random_uuid(),:user,'test','test',:started,:aborted,4)
+                """).param("user", reminder).param("started", evening.minusDays(1).minusHours(2))
+                .param("aborted", evening.minusDays(1).minusHours(1)).update();
+        var input = new AdminCampaigns.Fields("서비스 점검", null, null, java.util.List.of(eligible, optedOut, capped, reminder),
                 AdminCampaigns.TEMPLATE, draft.revisionId(), scheduled);
         var first = campaigns.create(creator, input);
         var second = campaigns.create(creator, input);
         for (var item : java.util.List.of(first, second)) {
             var preview = campaigns.preview(operator, item.id(), item.version());
-            assertEquals(3, preview.counts().localEligible());
+            assertEquals(4, preview.counts().localEligible());
             campaigns.confirm(operator, item.id(), preview.previewId(), item.version());
         }
         db.sql("UPDATE app_notification_preference SET enabled=false WHERE user_id=:user")
@@ -902,6 +911,7 @@ class AdminAuthIntegrationTest {
                 """).param("id", UUID.randomUUID()).param("user", capped)
                 .param("day", scheduled.atZoneSameInstant(AdminUsers.KST).toLocalDate()).update();
         var device = registerCampaignDevice(eligible, scheduled.plusDays(1));
+        var successfulDevice = registerCampaignDevice(eligible, scheduled.plusDays(1));
         campaignDispatch.run(first.id(), scheduled);
         campaignDispatch.run(first.id(), scheduled);
         campaignDispatch.run(second.id(), scheduled);
@@ -909,13 +919,14 @@ class AdminAuthIntegrationTest {
         assertEquals("COMPLETED", campaigns.find(first.id()).status());
         assertEquals(1, firstResult.counts().localInbox());
         assertEquals(0, firstResult.counts().providerAccepted());
-        assertEquals(Map.of("OPTED_OUT", 1L, "DAILY_CAP", 1L), firstResult.reasons());
+        assertEquals(Map.of("OPTED_OUT", 1L, "DAILY_CAP", 1L, "REMINDER_PRIORITY", 1L), firstResult.reasons());
         assertTrue(firstResult.items().stream().allMatch(row -> row.recipient().endsWith("***@***")));
         var secondResult = campaignDispatch.deliveries(second.id(), AdminCampaignDispatch.DeliveryStatus.EXCLUDED);
         assertEquals(0, secondResult.counts().localInbox());
-        assertEquals(Map.of("DUPLICATE_NOTICE", 1L, "OPTED_OUT", 1L, "DAILY_CAP", 1L), secondResult.reasons());
-        assertEquals(3, secondResult.items().size());
-        var duplicateCampaign = campaigns.create(creator, input);
+        assertEquals(Map.of("DUPLICATE_NOTICE", 1L, "OPTED_OUT", 1L, "DAILY_CAP", 1L, "REMINDER_PRIORITY", 1L), secondResult.reasons());
+        assertEquals(4, secondResult.items().size());
+        var duplicateCampaign = campaigns.create(creator, new AdminCampaigns.Fields("중복 공지", null, null,
+                java.util.List.of(eligible, optedOut, capped), AdminCampaigns.TEMPLATE, draft.revisionId(), scheduled));
         var duplicatePreview = campaigns.preview(operator, duplicateCampaign.id(), duplicateCampaign.version());
         assertEquals(0, duplicatePreview.counts().localEligible());
         assertEquals(1L, duplicatePreview.counts().excludedByReason().get("DUPLICATE_NOTICE"));
@@ -923,20 +934,24 @@ class AdminAuthIntegrationTest {
                 SELECT count(*) FROM app_notification n JOIN app_notification_local_slot s ON s.notification_id=n.id
                 WHERE n.user_id=:user AND n.kind='NOTICE' AND n.event_key=:key AND s.category='REMINDER'
                 """).param("user", eligible).param("key", draft.revisionId().toString()).query(Integer.class).single());
-        assertEquals(1, db.sql("""
-                SELECT count(*) FROM app_push_delivery p JOIN app_notification n ON n.id=p.notification_id
-                WHERE p.session_id=:session AND n.kind='NOTICE' AND p.state='WAITING'
-                """).param("session", device).query(Integer.class).single());
+        var waitingDevices = db.sql("""
+                SELECT p.session_id FROM app_push_delivery p JOIN app_notification n ON n.id=p.notification_id
+                WHERE n.user_id=:user AND n.event_key=:revision AND n.kind='NOTICE' AND p.state='WAITING'
+                """).param("user", eligible).param("revision", draft.revisionId().toString()).query(UUID.class).list();
+        assertEquals(2, waitingDevices.size());
+        assertEquals(java.util.Set.of(device, successfulDevice), java.util.Set.copyOf(waitingDevices));
         var retryAt = scheduled.plusMinutes(20);
         db.sql("UPDATE app_push_delivery SET state='FAILED',attempts=4,next_at=:next WHERE session_id=:id")
                 .param("id", device).param("next", retryAt.plusMinutes(1)).update();
+        db.sql("UPDATE app_push_delivery SET state='ACCEPTED',attempts=1 WHERE session_id=:id")
+                .param("id", successfulDevice).update();
         var unknownDevice = UUID.randomUUID();
         db.sql("""
                 INSERT INTO app_push_delivery(notification_id,session_id,provider,state,next_at,expires_at,attempts)
                 SELECT notification_id,:unknown,provider,'UNKNOWN',next_at,expires_at,1
                 FROM app_push_delivery WHERE session_id=:device
                 """).param("unknown", unknownDevice).param("device", device).update();
-        assertEquals(Map.of("FAILED", 1L, "UNKNOWN", 1L), campaignDispatch.deliveries(first.id(), null).deviceCounts());
+        assertEquals(Map.of("FAILED", 1L, "UNKNOWN", 1L, "ACCEPTED", 1L), campaignDispatch.deliveries(first.id(), null).deviceCounts());
         db.sql("UPDATE app_notification_preference SET enabled=false WHERE user_id=:user")
                 .param("user", eligible).update();
         assertEquals(409, assertThrows(org.springframework.web.server.ResponseStatusException.class,
@@ -948,7 +963,7 @@ class AdminAuthIntegrationTest {
         assertEquals(receipt, campaignDispatch.retryDevices(operator, first.id(), "retry", "운영 점검", retryAt));
         assertEquals(409, assertThrows(org.springframework.web.server.ResponseStatusException.class,
                 () -> campaignDispatch.retryDevices(operator, first.id(), "retry", "다른 사유", retryAt)).getStatusCode().value());
-        assertEquals(Map.of("UNKNOWN", 1L, "WAITING", 1L), campaignDispatch.deliveries(first.id(), null).deviceCounts());
+        assertEquals(Map.of("UNKNOWN", 1L, "WAITING", 1L, "ACCEPTED", 1L), campaignDispatch.deliveries(first.id(), null).deviceCounts());
         assertEquals(1, db.sql("""
                 SELECT count(*) FROM app_push_delivery WHERE session_id=:id AND attempts=4
                     AND next_at=:next AND manual_retry_at=:manual
