@@ -30,7 +30,7 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 @Profile("local")
 class AdminDashboardExports {
-    enum Kind { DASHBOARD_AGGREGATE, CONTENT_PERFORMANCE }
+    enum Kind { DASHBOARD_AGGREGATE, CONTENT_PERFORMANCE, MASKED_USERS }
     enum Format { CSV, PDF }
 
     record Request(Kind kind, AdminDashboard.Filter filter, List<String> columns, Format format) {}
@@ -38,11 +38,11 @@ class AdminDashboardExports {
     record Link(String url, OffsetDateTime expiresAt) {}
     record File(Format format, byte[] bytes, Kind kind) {}
     private record Pending(UUID id, int retryCount) {}
-    private record Archive(UUID owner, long epoch, byte[] bytes) {}
+    private record Archive(UUID owner, Kind kind, long epoch, byte[] bytes) {}
     private record Issued(OffsetDateTime expiresAt, Kind kind) {}
     private record Work(UUID id, UUID owner, Kind kind, LocalDate from, LocalDate to, String age, String pressure,
                         ContentEvents.Kind contentKind, String contentId, Integer revision, boolean combineVersions,
-                        Format format) {}
+                        Format format, Integer userSelectionCount) {}
 
     private static final org.slf4j.Logger LOG = LoggerFactory.getLogger(AdminDashboardExports.class);
     private static final String LINK_DOMAIN = "admin-dashboard-export";
@@ -55,9 +55,12 @@ class AdminDashboardExports {
     private final TransactionTemplate commit;
     private final AdminExportLinks links;
     private final JobLeases leases;
+    private final AdminUsers users;
+    private final tools.jackson.databind.json.JsonMapper json;
 
     AdminDashboardExports(JdbcClient db, AdminDashboard dashboard, AdminContentPerformance performance, AdminMutationJournal journal,
-                          PlatformTransactionManager transactions, AdminExportLinks links, JobLeases leases) {
+                          PlatformTransactionManager transactions, AdminExportLinks links, JobLeases leases,
+                          AdminUsers users, tools.jackson.databind.json.JsonMapper json) {
         this.db = db;
         this.dashboard = dashboard;
         this.performance = performance;
@@ -68,6 +71,41 @@ class AdminDashboardExports {
         this.commit = new TransactionTemplate(transactions);
         this.links = links;
         this.leases = leases;
+        this.users = users;
+        this.json = json;
+    }
+
+    @Transactional
+    Job requestUsers(AdminAuth.Identity actor, AdminUsers.Filters filter, List<UUID> ids, String key) {
+        lockRole(actor, Kind.MASKED_USERS);
+        if ((filter == null) == (ids == null) ||
+                (ids != null && (ids.isEmpty() || ids.size() > 100 || ids.stream().anyMatch(java.util.Objects::isNull)
+                        || ids.stream().distinct().count() != ids.size()))) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        var selection = ids == null ? filter : ids.stream().sorted().toList();
+        return journal.once(actor, "/exports/masked-users", key, selection, Job.class, () -> {
+            var id = UUID.randomUUID();
+            var hash = AdminAuth.hash(json.writeValueAsString(selection));
+            var job = db.sql("""
+                    INSERT INTO admin_dashboard_export(id,owner_id,kind,date_from,date_to,format,user_selection_hash,content_id)
+                    VALUES (:id,:owner,'MASKED_USERS',current_date,current_date,'CSV',:hash,:hash)
+                    ON CONFLICT (owner_id,user_selection_hash) WHERE status='QUEUED' AND kind='MASKED_USERS'
+                    DO UPDATE SET id=admin_dashboard_export.id RETURNING id,status,format
+                    """).param("id", id).param("owner", actor.admin().id()).param("hash", hash).query(Job.class).single();
+            if (!job.id().equals(id)) return job;
+            int count = filter != null ? users.snapshotExportMatches(id, filter) : db.sql("""
+                    INSERT INTO admin_masked_export_user(export_id,user_id,data_epoch)
+                    SELECT :id,u.id,u.content_event_epoch FROM app_user u
+                    WHERE u.status<>'DATA_DELETION_PENDING'
+                    AND u.id IN (SELECT value::uuid FROM jsonb_array_elements_text(CAST(:ids AS jsonb)))
+                    """).param("id", id).param("ids", json.writeValueAsString(ids)).update();
+            if (count == 0 || (ids != null && count != ids.size())) throw new ResponseStatusException(HttpStatus.CONFLICT);
+            db.sql("UPDATE admin_dashboard_export SET user_selection_count=:count WHERE id=:id")
+                    .param("count", count).param("id", id).update();
+            journal.append(actor, auditAction(Kind.MASKED_USERS, "REQUESTED"), "JOB", id.toString(), Map.of("count", count));
+            return job;
+        }, ignored -> {});
     }
 
     @Transactional
@@ -120,12 +158,16 @@ class AdminDashboardExports {
     }
 
     private static String auditAction(Kind kind, String suffix) {
-        return (kind == Kind.CONTENT_PERFORMANCE ? "CONTENT_PERFORMANCE_EXPORT_" : "DASHBOARD_EXPORT_") + suffix;
+        return switch (kind) {
+            case CONTENT_PERFORMANCE -> "CONTENT_PERFORMANCE_EXPORT_";
+            case MASKED_USERS -> "MASKED_USERS_EXPORT_";
+            case DASHBOARD_AGGREGATE -> "DASHBOARD_EXPORT_";
+        } + suffix;
     }
 
     @Transactional
     Job cancel(AdminAuth.Identity actor, UUID id, String reason, Kind kind) {
-        lockAnalyst(actor);
+        lockRole(actor, kind);
         if (reason == null || reason.isBlank() || reason.strip().codePointCount(0, reason.strip().length()) > 500) {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY);
         }
@@ -145,7 +187,7 @@ class AdminDashboardExports {
 
     @Transactional
     Job retry(AdminAuth.Identity actor, UUID id, String reason, String key) {
-        lockAnalyst(actor);
+        lockRole(actor, ownedKind(actor, id));
         var normalized = reason == null ? "" : reason.strip();
         var length = normalized.codePointCount(0, normalized.length());
         if (length == 0 || length > 500) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY);
@@ -166,7 +208,8 @@ class AdminDashboardExports {
                                     queued.content_kind,queued.content_id,queued.content_revision,queued.combine_versions)
                                 IS NOT DISTINCT FROM
                                 ROW(e.date_from,e.date_to,e.age,e.pressure_type,
-                                    e.content_kind,e.content_id,e.content_revision,e.combine_versions))
+                                    e.content_kind,e.content_id,e.content_revision,e.combine_versions)
+                            AND queued.user_selection_hash IS NOT DISTINCT FROM e.user_selection_hash)
                         RETURNING id,status,format
                         """).param("id", id).query(Job.class).optional()
                         .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT));
@@ -180,7 +223,7 @@ class AdminDashboardExports {
 
     @Transactional
     Link issue(AdminAuth.Identity actor, UUID id) {
-        lockAnalyst(actor);
+        lockRole(actor, ownedKind(actor, id));
         var token = links.create(LINK_DOMAIN, id, actor.admin().id());
         var issued = db.sql("""
                 INSERT INTO admin_dashboard_export_link(token_hash,export_id,expires_at)
@@ -197,7 +240,7 @@ class AdminDashboardExports {
 
     @Transactional
     File download(AdminAuth.Identity actor, UUID id, String token, String signature) {
-        lockAnalyst(actor);
+        lockRole(actor, ownedKind(actor, id));
         var hash = links.verify(LINK_DOMAIN, id, actor.admin().id(), token, signature);
         return db.sql("""
                 SELECT e.format,e.archive,e.kind FROM admin_dashboard_export e
@@ -282,9 +325,9 @@ class AdminDashboardExports {
         var epoch = db.sql("SELECT version FROM admin_dashboard_export_epoch WHERE singleton").query(Long.class).single();
         var job = db.sql("""
                 SELECT e.id,owner_id AS owner,kind,date_from AS "from",date_to AS "to",age,pressure_type AS pressure,
-                    content_kind,content_id,content_revision AS revision,combine_versions,format
+                    content_kind,content_id,content_revision AS revision,combine_versions,format,user_selection_count
                 FROM admin_dashboard_export e JOIN admin_account a ON a.id=e.owner_id AND a.status='ACTIVE'
-                JOIN admin_role r ON r.admin_id=a.id AND r.role='ANALYST'
+                JOIN admin_role r ON r.admin_id=a.id AND r.role=CASE WHEN e.kind='MASKED_USERS' THEN 'OPERATOR' ELSE 'ANALYST' END
                 WHERE e.id=:id AND e.status='QUEUED' AND e.retry_count=:retry
                     AND (e.next_run_at IS NULL OR e.next_run_at<=statement_timestamp())
                 """).param("id", pending.id()).param("retry", pending.retryCount()).query(Work.class).optional();
@@ -293,7 +336,18 @@ class AdminDashboardExports {
         var pressure = work.pressure() == null ? null : YfsiScoring.Pressure.valueOf(work.pressure());
         byte[] content;
         try {
-            if (work.kind() == Kind.CONTENT_PERFORMANCE) {
+            if (work.kind() == Kind.MASKED_USERS) {
+                var rows = users.exportRows(work.id());
+                if (rows.size() != work.userSelectionCount()) throw new ResponseStatusException(HttpStatus.CONFLICT);
+                var csv = new StringBuilder("\uFEFF사용자 ID,마스킹 이메일,가입일,최근 진단일,대표 유형,진단 횟수,계정 상태,태그\r\n");
+                for (var row : rows) {
+                    var fields = List.of(row.id().toString(), row.maskedEmail(), row.createdAt().toString(),
+                            java.util.Objects.toString(row.lastDiagnosisAt(), ""), java.util.Objects.toString(row.representativeType(), ""),
+                            Long.toString(row.diagnosisCount()), row.status().name(), String.join(", ", row.tags()));
+                    csv.append(fields.stream().map(kr.finsight.Csv::safeCell).collect(java.util.stream.Collectors.joining(","))).append("\r\n");
+                }
+                content = csv.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            } else if (work.kind() == Kind.CONTENT_PERFORMANCE) {
                 var filter = new AdminContentPerformance.Filter(work.from(), work.to(), work.contentKind(), pressure,
                         work.contentId(), work.revision(), work.combineVersions());
                 var report = new AdminContentExportDocument(filter, performance.load(filter), work.owner());
@@ -307,11 +361,11 @@ class AdminDashboardExports {
         } catch (IOException failure) {
             throw new java.io.UncheckedIOException(failure);
         }
-        return new Archive(work.owner(), epoch, content);
+        return new Archive(work.owner(), work.kind(), epoch, content);
     }
 
     private void complete(Pending job, JobLeases.Claim claim, Archive archive) {
-        if (!leases.lockOwned(claim) || !activeAnalyst(archive.owner())) return;
+        if (!leases.lockOwned(claim) || !activeRole(archive.owner(), archive.kind() == Kind.MASKED_USERS ? "OPERATOR" : "ANALYST")) return;
         long epoch = db.sql("SELECT version FROM admin_dashboard_export_epoch WHERE singleton FOR SHARE").query(Long.class).single();
         if (epoch != archive.epoch()) return;
         db.sql("""
@@ -328,20 +382,39 @@ class AdminDashboardExports {
         db.sql("DELETE FROM admin_dashboard_export_link WHERE expires_at<=clock_timestamp()").update();
         db.sql("UPDATE admin_dashboard_export SET archive=NULL WHERE archive IS NOT NULL AND expires_at<=clock_timestamp()")
                 .update();
+        db.sql("""
+                DELETE FROM admin_masked_export_user u USING admin_dashboard_export e
+                WHERE u.export_id=e.id AND (e.status IN ('COMPLETED','CANCELED') OR (e.status='FAILED' AND NOT e.retryable))
+                """).update();
     }
 
     private void lockAnalyst(AdminAuth.Identity actor) {
+        lockRole(actor, Kind.DASHBOARD_AGGREGATE);
+    }
+
+    private Kind ownedKind(AdminAuth.Identity actor, UUID id) {
         if (actor == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
-        if (!actor.permissions().contains("ANALYST") || !activeAnalyst(actor.admin().id())) {
+        if (!actor.permissions().contains("ANALYST") && !actor.permissions().contains("OPERATOR")) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+        }
+        return db.sql("SELECT kind FROM admin_dashboard_export WHERE id=:id AND owner_id=:owner")
+                .param("id", id).param("owner", actor.admin().id()).query(Kind.class).optional()
+                .orElseThrow(AdminDashboardExports::missing);
+    }
+
+    private void lockRole(AdminAuth.Identity actor, Kind kind) {
+        if (actor == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
+        var role = kind == Kind.MASKED_USERS ? "OPERATOR" : "ANALYST";
+        if (!actor.permissions().contains(role) || !activeRole(actor.admin().id(), role)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN);
         }
     }
 
-    private boolean activeAnalyst(UUID actorId) {
+    private boolean activeRole(UUID actorId, String role) {
         return db.sql("""
                 SELECT a.id FROM admin_account a JOIN admin_role r ON r.admin_id=a.id
-                WHERE a.id=:id AND a.status='ACTIVE' AND r.role='ANALYST' FOR SHARE OF a,r
-                """).param("id", actorId).query(UUID.class).optional().isPresent();
+                WHERE a.id=:id AND a.status='ACTIVE' AND r.role=:role FOR SHARE OF a,r
+                """).param("id", actorId).param("role", role).query(UUID.class).optional().isPresent();
     }
 
     private static ResponseStatusException missing() {

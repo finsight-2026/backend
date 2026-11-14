@@ -122,6 +122,22 @@ class AdminUsers {
                 """ + query.source()).params(query.parameters()).param("preview", preview).update();
     }
 
+    int snapshotExportMatches(UUID id, Filters filters) {
+        var query = filterQuery(filters);
+        return db.sql("""
+                INSERT INTO admin_masked_export_user(export_id,user_id,data_epoch) SELECT :id,u.id,u.content_event_epoch
+                """ + query.source() + " AND u.status<>'DATA_DELETION_PENDING'")
+                .params(query.parameters()).param("id", id).update();
+    }
+
+    List<User> exportRows(UUID id) {
+        return db.sql("SELECT " + USER_COLUMNS + USER_SOURCE + """
+                JOIN admin_masked_export_user e ON e.user_id=u.id AND e.data_epoch=u.content_event_epoch
+                WHERE e.export_id=:id AND u.status<>'DATA_DELETION_PENDING'
+                ORDER BY latest.completed_at DESC NULLS LAST,u.id
+                """).param("id", id).query(AdminUsers::user).list();
+    }
+
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     Optional<Detail> detail(UUID id) {
         return db.sql("SELECT " + USER_COLUMNS + ", p.attributes AS profile " + USER_SOURCE + " WHERE u.id = :id")

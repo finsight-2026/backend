@@ -24,7 +24,7 @@ class AdminExportsController {
     private final AdminDashboardExports aggregates;
     private final AdminPiiExports pii;
 
-    enum Kind { DASHBOARD_AGGREGATE, CONTENT_PERFORMANCE, PII_RAW }
+    enum Kind { DASHBOARD_AGGREGATE, CONTENT_PERFORMANCE, PII_RAW, MASKED_USERS }
     record Filter(LocalDate from, LocalDate to, String age, YfsiScoring.Pressure type,
                   UUID userId, UUID diagnosisId, AdminPiiExports.Scope scope,
                   ContentEvents.Kind kind, String contentId, Integer revision, Boolean combineVersions) {
@@ -49,11 +49,20 @@ class AdminExportsController {
     record Download(UUID grantId) {}
     record Cancel(String reason, Kind kind) {}
     record Retry(String reason) {}
+    record UserSelection(AdminBulkTagsController.Filter filter, List<UUID> userIds) {}
 
     AdminExportsController(AdminAuth auth, AdminDashboardExports aggregates, AdminPiiExports pii) {
         this.auth = auth;
         this.aggregates = aggregates;
         this.pii = pii;
+    }
+
+    @PostMapping("/exports/masked-users")
+    ResponseEntity<AdminDashboardExports.Job> requestUsers(@CookieValue(name = SESSION, required = false) String session,
+            @RequestHeader(name = "Idempotency-Key", required = false) String key, @RequestBody UserSelection input) {
+        var job = aggregates.requestUsers(auth.identity(session), input.filter() == null ? null : input.filter().toFilters(),
+                input.userIds(), key);
+        return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).body(job);
     }
 
     @PostMapping("/exports")
@@ -76,6 +85,7 @@ class AdminExportsController {
             }
             case PII_RAW -> pii.request(actor, session, input.filter() == null ? null : input.filter().personal(),
                     input.grantId(), input.reason(), input.columns(), input.format());
+            case MASKED_USERS -> throw invalid();
         };
         return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).body(job);
     }
@@ -98,7 +108,8 @@ class AdminExportsController {
                 : aggregates.download(actor, id, token, signature);
         boolean pdf = file.format() == AdminDashboardExports.Format.PDF;
         String name = personal ? "finsight-private-" : file.kind() == AdminDashboardExports.Kind.CONTENT_PERFORMANCE
-                ? "finsight-content-performance-" : "finsight-dashboard-";
+                ? "finsight-content-performance-" : file.kind() == AdminDashboardExports.Kind.MASKED_USERS
+                ? "finsight-users-" : "finsight-dashboard-";
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
                 .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
                         .filename(name + id + (pdf ? ".pdf" : ".csv")).build().toString())
@@ -120,8 +131,8 @@ class AdminExportsController {
             @PathVariable UUID id, @RequestBody Cancel input) {
         var actor = auth.identity(session);
         var job = input.kind() == Kind.PII_RAW ? pii.cancel(actor, session, id, input.reason())
-                : aggregates.cancel(actor, id, input.reason(), input.kind() == Kind.CONTENT_PERFORMANCE
-                        ? AdminDashboardExports.Kind.CONTENT_PERFORMANCE : AdminDashboardExports.Kind.DASHBOARD_AGGREGATE);
+                : aggregates.cancel(actor, id, input.reason(), input.kind() == null
+                        ? AdminDashboardExports.Kind.DASHBOARD_AGGREGATE : AdminDashboardExports.Kind.valueOf(input.kind().name()));
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(job);
     }
 

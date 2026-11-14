@@ -1097,6 +1097,42 @@ class AdminAuthIntegrationTest {
 
     @Test
     @org.springframework.transaction.annotation.Transactional
+    void maskedUserExportPinsMembershipAndRequiresTheOwningOperator() throws Exception {
+        var operator = noteAdmin("OPERATOR");
+        var analyst = noteAdmin("ANALYST");
+        var other = noteAdmin("OPERATOR");
+        monitorSession(operator);
+        monitorSession(analyst);
+        monitorSession(other);
+        var now = java.time.OffsetDateTime.now();
+        var user = dashboardAccount(now, false, "ACTIVE");
+        db.sql("UPDATE app_user SET email='private-export@example.test' WHERE id=:id").param("id", user).update();
+        var day = now.atZoneSameInstant(AdminUsers.KST).toLocalDate();
+        var filter = new AdminUsers.Filters(null, null, null, "30_PLUS", null, null, day, day, true, 1, 20);
+        assertEquals(403, assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> dashboardExports.requestUsers(analyst, filter, null, "masked")).getStatusCode().value());
+        var job = dashboardExports.requestUsers(operator, filter, null, "masked");
+        assertEquals(job, dashboardExports.requestUsers(operator, filter, null, "masked"));
+        var later = dashboardAccount(now, false, "ACTIVE");
+        dashboardExports.process(job.id());
+        assertEquals(404, assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> dashboardExports.issue(other, job.id())).getStatusCode().value());
+        var link = dashboardExports.issue(operator, job.id());
+        var params = org.springframework.web.util.UriComponentsBuilder.fromUriString(link.url()).build().getQueryParams();
+        var file = dashboardExports.download(operator, job.id(), params.getFirst("token"), params.getFirst("signature"));
+        var csv = new String(file.bytes(), java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(csv.contains(user.toString()));
+        assertTrue(csv.contains("p***@***"));
+        assertFalse(csv.contains("private-export@example.test"));
+        assertFalse(csv.contains(later.toString()));
+        db.sql("DELETE FROM admin_role WHERE admin_id=:id AND role='OPERATOR'").param("id", operator.admin().id()).update();
+        assertEquals(403, assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> dashboardExports.download(operator, job.id(), params.getFirst("token"), params.getFirst("signature")))
+                .getStatusCode().value());
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
     void dashboardExportsPinTheFilterAndProtectEveryDownload() throws Exception {
         var analyst = noteAdmin("ANALYST");
         var other = noteAdmin("ANALYST");

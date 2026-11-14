@@ -17,7 +17,7 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 @Profile("local")
 class AdminJobs {
-    enum Kind { CAMPAIGN, BULK_TAG, APP_EXPORT, DATA_DELETION, ACCOUNT_WITHDRAWAL, DASHBOARD_AGGREGATE, CONTENT_PERFORMANCE, PII_RAW }
+    enum Kind { CAMPAIGN, BULK_TAG, APP_EXPORT, DATA_DELETION, ACCOUNT_WITHDRAWAL, DASHBOARD_AGGREGATE, CONTENT_PERFORMANCE, PII_RAW, MASKED_USERS }
     enum Status { PENDING, QUEUED, RUNNING, SCHEDULED, SENDING, COMPLETED, FAILED, PARTIAL_FAILED, CANCELED, CANCEL_REQUESTED }
 
     record Job(UUID id, Kind kind, Status status, UUID actorId, String scope, OffsetDateTime requestedAt,
@@ -40,14 +40,15 @@ class AdminJobs {
                     o.actor_id,o.scope,o.requested_at,coalesce(o.started_at,l.claimed_at) AS started_at,
                     o.completed_at,o.expires_at,o.due_at,o.processed,o.total,o.error_code
                 FROM admin_operation_monitor o LEFT JOIN job_execution_lease l
-                    ON o.kind IN ('DASHBOARD_AGGREGATE','CONTENT_PERFORMANCE') AND o.status='QUEUED'
+                    ON o.kind IN ('DASHBOARD_AGGREGATE','CONTENT_PERFORMANCE','MASKED_USERS') AND o.status='QUEUED'
                     AND l.queue='ADMIN_AGGREGATE_EXPORT' AND l.job_id=o.id AND l.expires_at>statement_timestamp()
             ) m
             LEFT JOIN (SELECT id AS export_id,retry_count,retryable,next_run_at FROM admin_dashboard_export) a
-                ON a.export_id=m.id AND m.kind IN ('DASHBOARD_AGGREGATE','CONTENT_PERFORMANCE')
+                ON a.export_id=m.id AND m.kind IN ('DASHBOARD_AGGREGATE','CONTENT_PERFORMANCE','MASKED_USERS')
             LEFT JOIN (SELECT id AS operation_id,retry_count,requeue_count,next_run_at,error_code FROM deletion_operation) d
                 ON d.operation_id=m.id AND m.kind IN ('DATA_DELETION','ACCOUNT_WITHDRAWAL')
             WHERE ((:operator AND kind IN ('CAMPAIGN','BULK_TAG'))
+                OR (:operator AND kind='MASKED_USERS' AND actor_id=:owner)
                 OR (:privacy AND (kind IN ('APP_EXPORT','DATA_DELETION','ACCOUNT_WITHDRAWAL')
                     OR (kind='PII_RAW' AND actor_id=:owner)))
                 OR (:analyst AND kind IN ('DASHBOARD_AGGREGATE','CONTENT_PERFORMANCE') AND actor_id=:owner))
