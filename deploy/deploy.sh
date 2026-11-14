@@ -47,9 +47,21 @@ check_https() {
     "https://$domain$endpoint" >/dev/null
 }
 
+check_status() {
+  local expected=$1 url=$2 actual
+  actual=$(curl --silent --show-error --max-time 8 --output /dev/null --write-out '%{http_code}' "$url") || return 1
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'Expected HTTP %s from %s, received %s\n' "$expected" "$url" "$actual" >&2
+    return 1
+  fi
+}
+
 if "${compose[@]}" up -d --wait --wait-timeout 120 backend \
     && check_https /actuator/health \
-    && check_https /api/v1/surveys/current; then
+    && check_https /api/v1/surveys/current \
+    && check_status 200 "http://127.0.0.1:$port/api/v1/admin/auth/csrf" \
+    && check_status 401 "http://127.0.0.1:$port/api/v1/admin/auth/me" \
+    && check_status 404 "https://$domain/api/v1/admin/auth/csrf"; then
   printf '%s\n' "$image" >.release/current-image.new
   mv -f .release/current-image.new .release/current-image
   exit 0
