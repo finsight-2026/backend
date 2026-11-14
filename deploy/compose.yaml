@@ -1,0 +1,28 @@
+services:
+  backend:
+    image: ${FINSIGHT_BACKEND_IMAGE:?Set an immutable backend image}
+    restart: unless-stopped
+    mem_limit: ${FINSIGHT_BACKEND_MEMORY:-640m}
+    ports:
+      - "127.0.0.1:${FINSIGHT_LOCAL_PORT:?Set the local port}:8080"
+    env_file:
+      - runtime.env
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVER_ADDRESS: 0.0.0.0
+      SERVER_FORWARD_HEADERS_STRATEGY: framework
+      FINSIGHT_POLICY_PREVIEW: "false"
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: 6
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=32m
+networks:
+  data:
+    external: true
+    name: finsight-data
