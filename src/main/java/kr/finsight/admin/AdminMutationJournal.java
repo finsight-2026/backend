@@ -25,7 +25,8 @@ import tools.jackson.databind.json.JsonMapper;
 @Profile("local")
 class AdminMutationJournal {
     record Entry(UUID id, UUID actorId, java.util.List<String> roles, String action, String targetType,
-                 String targetId, String result, JsonNode changes, UUID traceId, OffsetDateTime createdAt) {}
+                 String targetId, String result, JsonNode changes, UUID traceId, OffsetDateTime createdAt,
+                 boolean targetRemoved) {}
     record Page(java.util.List<Entry> items, int page, int size, long total) {}
     record Filter(UUID actorId, String action, String targetId, String result, String reason,
                   LocalDate from, LocalDate to, int page, int size) {}
@@ -136,13 +137,20 @@ class AdminMutationJournal {
         }
         var source = " FROM audit_log WHERE " + String.join(" AND ", where);
         var total = db.sql("SELECT count(*)" + source).params(params).query(Long.class).single();
-        var items = db.sql("SELECT id,actor_id,roles,action,target_type,target_id,result,changes_safe,trace_id,created_at"
+        var items = db.sql("""
+                SELECT id,actor_id,roles,action,target_type,target_id,result,changes_safe,trace_id,created_at,
+                    CASE WHEN target_type='APP_USER'
+                        AND target_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN NOT EXISTS (SELECT 1 FROM app_user u WHERE u.id=CAST(audit_log.target_id AS uuid))
+                    ELSE false END AS target_removed
+                """
                         + source + " ORDER BY created_at DESC,id DESC LIMIT :size OFFSET :offset")
                 .params(params).param("size", filter.size()).param("offset", (long)(filter.page() - 1) * filter.size())
                 .query((row, index) -> new Entry(row.getObject(1, UUID.class), row.getObject(2, UUID.class),
                         java.util.List.of((String[]) row.getArray(3).getArray()), row.getString(4), row.getString(5),
                         row.getString(6), row.getString(7), json.readTree(row.getString(8)),
-                        row.getObject(9, UUID.class), row.getObject(10, OffsetDateTime.class))).list();
+                        row.getObject(9, UUID.class), row.getObject(10, OffsetDateTime.class),
+                        row.getBoolean("target_removed"))).list();
         return new Page(items, filter.page(), filter.size(), total);
     }
 

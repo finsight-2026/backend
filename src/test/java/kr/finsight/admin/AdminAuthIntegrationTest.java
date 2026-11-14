@@ -36,6 +36,7 @@ class AdminAuthIntegrationTest {
     private static final String SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
     @Autowired AdminAuth auth;
     @Autowired AdminAccounts accounts;
+    @Autowired AdminMutationJournal journal;
     @Autowired AdminTotp totp;
     @Autowired JdbcClient db;
     @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
@@ -701,6 +702,29 @@ class AdminAuthIntegrationTest {
                     .param("id", campaign.id()).query(Integer.class).single());
             return null;
         }));
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void auditShowsRemovedUserWithoutChangingTheAuditEntry() throws Exception {
+        var supervisor = noteAdmin("SUPER_ADMIN");
+        var session = monitorSession(supervisor);
+        var user = dashboardAccount(java.time.OffsetDateTime.now(), false, "ACTIVE");
+        journal.append(supervisor, "USER_TAGS_UPDATED", "APP_USER", user.toString(), Map.of());
+        var request = get("/api/v1/admin/audit-logs").cookie(session).param("targetId", user.toString());
+        var auditId = readAuditEntry(http.perform(request).andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].targetRemoved").value(false)));
+
+        db.sql("DELETE FROM app_user WHERE id=:id").param("id", user).update();
+
+        http.perform(request).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1))
+                .andExpect(jsonPath("$.items[0].id").value(auditId))
+                .andExpect(jsonPath("$.items[0].targetId").value(user.toString()))
+                .andExpect(jsonPath("$.items[0].targetRemoved").value(true));
+    }
+
+    private String readAuditEntry(ResultActions response) throws Exception {
+        return json.readTree(response.andReturn().getResponse().getContentAsString()).path("items").get(0).path("id").asString();
     }
 
     @Test
