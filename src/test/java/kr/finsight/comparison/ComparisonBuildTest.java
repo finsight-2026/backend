@@ -3,6 +3,7 @@ package kr.finsight.comparison;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
@@ -15,7 +16,9 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
+import tools.jackson.databind.JsonNode;
 
 @ActiveProfiles("local")
 @Import(TestcontainersConfiguration.class)
@@ -27,6 +30,7 @@ class ComparisonBuildTest {
     @Autowired JdbcClient db;
     @Autowired ComparisonBuild build;
     @Autowired ComparisonPublishing publishing;
+    @Autowired ComparisonRead read;
     @Autowired kr.finsight.jobs.JobLeases leases;
 
     @Test
@@ -207,6 +211,76 @@ class ComparisonBuildTest {
         publishing.transition(actor, id, new ComparisonPublishing.Change(
                 ComparisonPublishing.Action.UNPUBLISH, published.version(), null, null, null, "운영 검토에 따라 공개 중지", null));
         assertFalse(publishing.publications().stream().anyMatch(row -> row.snapshotId().equals(id)));
+    }
+
+    @Test
+    @Transactional
+    void scheduledPublicationEnforcesWindowAndExplicitReplacement() {
+        var actor = UUID.randomUUID();
+        db.sql("""
+                INSERT INTO admin_account(id,email,name,password_hash,totp_secret_encrypted,status)
+                VALUES (:id,:email,'fixture','test',decode('00','hex'),'ACTIVE')
+                """).param("id", actor).param("email", actor + "@example.test").update();
+        var reader = account(true, "ACTIVE");
+        diagnosis(reader, "FUTURE", 0, "yfsi-v1");
+        publishing.updateMinimum(YfsiScoring.Pressure.FUTURE, 30, 0, "공개 표본 기준을 설정합니다");
+        var now = db.sql("SELECT now()").query(OffsetDateTime.class).single();
+        var scheduled = approveFutureComparison(actor, now.plusHours(1), now.plusHours(2), 50);
+        var overlap = approveFutureComparison(actor, now.plusMinutes(90), now.plusHours(3), 60);
+
+        publishing.transition(actor, scheduled.id(), publicationAction(ComparisonPublishing.Action.SCHEDULE, scheduled, null));
+        assertEquals(HttpStatus.CONFLICT, assertThrows(ResponseStatusException.class,
+                () -> publishing.transition(actor, overlap.id(),
+                        publicationAction(ComparisonPublishing.Action.SCHEDULE, overlap, null))).getStatusCode());
+        publishing.promote("FUTURE");
+        assertEquals("SCHEDULED", publishing.publications().stream().filter(row -> row.snapshotId().equals(scheduled.id()))
+                .findFirst().orElseThrow().status());
+        var beforeStart = read.current(reader);
+        assertEquals(false, beforeStart.get("available"));
+        assertFalse(beforeStart.containsKey("metrics"));
+
+        db.sql("UPDATE comparison_publication SET starts_at=now() WHERE snapshot_id=:id").param("id", scheduled.id()).update();
+        assertEquals(false, read.current(reader).get("available"));
+        publishing.promote("FUTURE");
+        assertEquals(true, read.current(reader).get("available"));
+        var publication = publishing.publications().stream().filter(row -> row.snapshotId().equals(scheduled.id()))
+                .findFirst().orElseThrow();
+        assertEquals("ACTIVE", publication.status());
+
+        var replacement = approveFutureComparison(actor, now.minusMinutes(1), now.plusHours(1), 70);
+        assertEquals(HttpStatus.CONFLICT, assertThrows(ResponseStatusException.class,
+                () -> publishing.transition(actor, replacement.id(),
+                        publicationAction(ComparisonPublishing.Action.PUBLISH, replacement, null))).getStatusCode());
+        publishing.transition(actor, replacement.id(),
+                publicationAction(ComparisonPublishing.Action.PUBLISH, replacement, publication.id()));
+        var active = publishing.publications().stream().filter(row -> row.type().equals("FUTURE")).toList();
+        assertEquals(1, active.size());
+        assertEquals(replacement.id(), active.getFirst().snapshotId());
+        assertEquals(70, ((JsonNode) read.current(reader).get("metrics")).path("YFSI_MEAN").asInt());
+
+        db.sql("UPDATE comparison_publication SET ends_at=now() WHERE snapshot_id=:id").param("id", replacement.id()).update();
+        var expired = read.current(reader);
+        assertEquals(false, expired.get("available"));
+        assertEquals("EXPIRED", expired.get("reason"));
+        assertFalse(expired.containsKey("metrics"));
+    }
+
+    private ComparisonBuild.Snapshot approveFutureComparison(UUID actor, OffsetDateTime start, OffsetDateTime end, int mean) {
+        var id = UUID.randomUUID();
+        db.sql("""
+                INSERT INTO comparison_snapshot
+                    (id,type,period_start,period_end,formula_version,dataset_version,sample_n,metrics,status,created_by)
+                SELECT :id,type,current_date-29,current_date,'yfsi-v1',version,30,
+                    jsonb_build_object('YFSI_MEAN',jsonb_build_object('n',30,'mean',:mean)),'IN_REVIEW',:actor
+                FROM comparison_dataset WHERE type='FUTURE'
+                """).param("id", id).param("mean", mean).param("actor", actor).update();
+        return publishing.transition(actor, id, new ComparisonPublishing.Change(ComparisonPublishing.Action.APPROVE,
+                0L, List.of("YFSI_MEAN"), start, end, "단독 운영으로 집계 승인", null));
+    }
+
+    private ComparisonPublishing.Change publicationAction(ComparisonPublishing.Action action,
+            ComparisonBuild.Snapshot snapshot, UUID replacePublication) {
+        return new ComparisonPublishing.Change(action, snapshot.version(), null, null, null, null, replacePublication);
     }
 
     private UUID account(boolean test, String status) {
