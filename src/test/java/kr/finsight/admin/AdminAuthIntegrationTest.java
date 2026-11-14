@@ -1529,6 +1529,9 @@ class AdminAuthIntegrationTest {
         assertTrue(session.isHttpOnly());
         assertTrue(session.getSecure());
         assertEquals("Strict", session.getAttribute("SameSite"));
+        assertEquals(java.time.Duration.ofHours(8).toSeconds(), session.getMaxAge());
+        assertTrue(db.sql("SELECT expires_at = created_at + interval '8 hours' FROM admin_session")
+                .query(Boolean.class).single());
         http.perform(get(PATH + "/me").cookie(session)).andExpect(status().isOk());
         var users = "/api/v1/admin/users";
         http.perform(get(users)).andExpect(status().isUnauthorized());
@@ -1665,7 +1668,9 @@ class AdminAuthIntegrationTest {
         postJson(write.apply("/mfa"), Map.of("challengeId", replacement, "code", code))
                 .andExpect(status().isUnauthorized());
         db.sql("UPDATE admin_session SET last_interaction_at = now() - interval '10 minutes'").update();
+        var dashboardPath = "/api/v1/admin/dashboard";
         http.perform(get(PATH + "/me").cookie(session)).andExpect(status().isOk());
+        http.perform(get(dashboardPath).cookie(session)).andExpect(status().isOk());
         assertTrue(db.sql("SELECT last_interaction_at < now() - interval '9 minutes' FROM admin_session")
                 .query(Boolean.class).single());
         http.perform(write.apply("/activity").cookie(session)).andExpect(status().isNoContent());
@@ -1676,6 +1681,23 @@ class AdminAuthIntegrationTest {
         db.sql("UPDATE admin_session SET session_version = session_version + 1").update();
         db.sql("UPDATE admin_session SET last_interaction_at = now() - interval '31 minutes'").update();
         http.perform(get(PATH + "/me").cookie(session)).andExpect(status().isUnauthorized());
+        http.perform(get(dashboardPath).cookie(session)).andExpect(status().isUnauthorized());
+        http.perform(write.apply("/activity").cookie(session)).andExpect(status().isUnauthorized());
+
+        db.sql("""
+                UPDATE admin_session SET created_at = now() - interval '7 hours 59 minutes',
+                    expires_at = now() + interval '1 minute', last_interaction_at = now() - interval '10 minutes'
+                """).update();
+        http.perform(write.apply("/activity").cookie(session)).andExpect(status().isNoContent());
+        assertTrue(db.sql("SELECT expires_at = created_at + interval '8 hours' FROM admin_session")
+                .query(Boolean.class).single());
+        db.sql("""
+                UPDATE admin_session SET created_at = now() - interval '8 hours 1 minute',
+                    expires_at = now() - interval '1 minute', last_interaction_at = now() - interval '1 minute'
+                """).update();
+        http.perform(get(PATH + "/me").cookie(session)).andExpect(status().isUnauthorized());
+        http.perform(get(dashboardPath).cookie(session)).andExpect(status().isUnauthorized());
+        http.perform(write.apply("/activity").cookie(session)).andExpect(status().isUnauthorized());
         http.perform(write.apply("/logout").cookie(session)).andExpect(status().isNoContent());
         assertEquals(0, db.sql("SELECT count(*) FROM admin_session").query(Integer.class).single());
     }
