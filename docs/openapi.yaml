@@ -1190,6 +1190,72 @@ paths:
         '403': {description: 운영자 권한·CSRF·출처 검사 실패}
         '404': {description: 세그먼트 없음}
         '409': {description: 보관된 세그먼트}
+  /api/v1/admin/campaigns/target-preview:
+    post:
+      summary: 사용자 목록 필터의 CRM 대상 확정
+      description: 대상 목록을 요청자에게 귀속해 10분간 저장한다. 응답에는 개별 사용자 식별자를 반환하지 않는다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: {type: string, format: uuid}
+                diagnosisId: {type: string, format: uuid}
+                type: {type: string}
+                age: {type: string}
+                status: {type: string, enum: [ACTIVE, WITHDRAWAL_PENDING]}
+                tagId: {type: string, format: uuid}
+                from: {type: string, format: date}
+                to: {type: string, format: date}
+                includeNoDiagnosis: {type: boolean}
+      responses:
+        '200':
+          description: 대상 수 및 만료시각
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [previewId, total, eligible, excluded, expiresAt]
+                properties:
+                  previewId: {type: string, format: uuid}
+                  total: {type: integer}
+                  eligible: {type: integer}
+                  excluded: {type: integer}
+                  expiresAt: {type: string, format: date-time}
+        '403': {description: 운영자 권한 없음}
+  /api/v1/admin/campaigns/from-target-preview:
+    post:
+      summary: 확정된 필터 대상으로 CRM 초안 생성
+      parameters:
+        - {in: header, name: Idempotency-Key, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [previewId, name, noticeRevisionId]
+              properties:
+                previewId: {type: string, format: uuid}
+                name: {type: string, maxLength: 80}
+                noticeRevisionId: {type: string, format: uuid}
+                scheduledAt: {type: string, format: date-time}
+      responses:
+        '201':
+          description: 초안 ID
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: {type: string, format: uuid}
+        '403': {description: 운영자 권한 없음}
+        '404': {description: 미리보기 없음 또는 만료}
+        '409': {description: 대상이 바뀌거나 기존 멱등 요청과 본문 불일치}
+        '422': {description: 필수값 또는 예약 시각이 유효하지 않음}
   /api/v1/admin/campaigns/{id}/preview:
     post:
       summary: 캠페인 실행 시각 기준으로 예상 대상 집계

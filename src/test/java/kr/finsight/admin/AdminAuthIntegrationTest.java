@@ -49,6 +49,7 @@ class AdminAuthIntegrationTest {
     @Autowired AdminSegments segments;
     @Autowired AdminNotices notices;
     @Autowired AdminCampaigns campaigns;
+    @Autowired AdminCampaignTargetPreview campaignTargets;
     @Autowired AdminCampaignDispatch campaignDispatch;
     @Autowired AdminDiagnosisFunnel funnel;
     @Autowired NewsPublicationJob newsPublicationJob;
@@ -680,6 +681,48 @@ class AdminAuthIntegrationTest {
         assertEquals("SCHEDULED", job.status());
         assertEquals(job.id(), campaigns.confirm(operator, saved.id(), preview.previewId(), saved.version()).id());
         assertEquals("CANCELED", campaigns.cancel(operator, saved.id(), job.version(), "일정 변경").status());
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void filteredCampaignDraftPinsUsersAndRejectsChangedTargets() {
+        var operator = noteAdmin("OPERATOR");
+        var reviewer = noteAdmin("SUPER_ADMIN");
+        var now = java.time.OffsetDateTime.now();
+        var day = now.atZoneSameInstant(AdminUsers.KST).toLocalDate();
+        var first = dashboardAccount(now, false, "ACTIVE");
+        var pending = dashboardAccount(now, false, "WITHDRAWAL_PENDING");
+        var tag = tags.create(operator, "대상 미리보기 검증");
+        for (var user : java.util.List.of(first, pending)) {
+            db.sql("INSERT INTO user_tag VALUES (:user,:tag)").param("user", user).param("tag", tag.id()).update();
+        }
+        var filters = new AdminUsers.Filters(null, null, null, null, null, tag.id(), day, day, true, 1, 20);
+        var preview = campaignTargets.preview(operator.admin().id(), filters);
+        assertEquals(2, preview.total());
+        assertEquals(1, preview.eligible());
+        assertEquals(1, preview.excluded());
+        var later = dashboardAccount(now, false, "ACTIVE");
+        db.sql("INSERT INTO user_tag VALUES (:user,:tag)").param("user", later).param("tag", tag.id()).update();
+
+        var draft = notices.draft(operator, null, null,
+                new AdminNotices.Fields("이용 안내", "서비스 점검 일정", "서비스 점검이 예정되어 있습니다.", 0));
+        var submitted = noticeTransition(operator, draft, AdminNotices.Action.SUBMIT, null, null, false);
+        var approved = noticeTransition(reviewer, submitted, AdminNotices.Action.APPROVE, null, null, false);
+        noticeTransition(reviewer, approved, AdminNotices.Action.PUBLISH, null, null, true);
+        var scheduled = AdminCampaigns.executionTime(now.plusDays(1), null);
+        var request = new AdminCampaignTargetPreview.Draft(preview.previewId(), "필터 대상", draft.revisionId(), scheduled);
+        var receipt = campaignTargets.create(operator, request, "fixed-target");
+        assertEquals(receipt, campaignTargets.create(operator, request, "fixed-target"));
+        assertEquals(java.util.List.of(first), campaigns.list().stream().filter(row -> row.id().equals(receipt.id()))
+                .findFirst().orElseThrow().userIds());
+        assertEquals(0, db.sql("SELECT count(*) FROM campaign_job WHERE campaign_id=:id").param("id", receipt.id())
+                .query(Integer.class).single());
+
+        var changed = campaignTargets.preview(operator.admin().id(), filters);
+        db.sql("UPDATE app_user SET status='WITHDRAWAL_PENDING' WHERE id=:id").param("id", first).update();
+        var stale = new AdminCampaignTargetPreview.Draft(changed.previewId(), "변경된 대상", draft.revisionId(), scheduled);
+        assertEquals(409, assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> campaignTargets.create(operator, stale, "changed-target")).getStatusCode().value());
     }
 
     @Test

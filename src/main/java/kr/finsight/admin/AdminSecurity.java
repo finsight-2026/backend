@@ -83,7 +83,8 @@ class AdminSecurity {
                         .requestMatchers(HttpMethod.POST, "/api/v1/admin/exports", "/api/v1/admin/exports/*/download",
                                 "/api/v1/admin/jobs/*/cancel", "/api/v1/admin/jobs/*/retry",
                                 "/api/v1/admin/deletion-requests/*/retry").permitAll()
-                        .requestMatchers(HttpMethod.POST, "/api/v1/admin/campaigns", "/api/v1/admin/campaigns/*/preview",
+                        .requestMatchers(HttpMethod.POST, "/api/v1/admin/campaigns", "/api/v1/admin/campaigns/target-preview",
+                                "/api/v1/admin/campaigns/from-target-preview", "/api/v1/admin/campaigns/*/preview",
                                 "/api/v1/admin/campaigns/*/send", "/api/v1/admin/campaigns/*/cancel",
                                 "/api/v1/admin/campaigns/*/deliveries/retry").permitAll()
                         .requestMatchers(HttpMethod.PATCH, "/api/v1/admin/campaigns/*").permitAll()

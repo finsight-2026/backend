@@ -23,11 +23,29 @@ class AdminCampaignsController {
     private final AdminAuth auth;
     private final AdminCampaigns campaigns;
     private final AdminCampaignDispatch dispatch;
+    private final AdminCampaignTargetPreview targets;
 
-    AdminCampaignsController(AdminAuth auth, AdminCampaigns campaigns, AdminCampaignDispatch dispatch) {
+    AdminCampaignsController(AdminAuth auth, AdminCampaigns campaigns, AdminCampaignDispatch dispatch, AdminCampaignTargetPreview targets) {
         this.auth = auth;
         this.campaigns = campaigns;
         this.dispatch = dispatch;
+        this.targets = targets;
+    }
+
+    @PostMapping("/target-preview")
+    ResponseEntity<AdminCampaignTargetPreview.Preview> targetPreview(
+            @CookieValue(name = SESSION, required = false) String session, @RequestBody AdminBulkTagsController.Filter filter) {
+        var actor = operator(session);
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(targets.preview(actor.admin().id(), filter.toFilters()));
+    }
+
+    @PostMapping("/from-target-preview")
+    @ResponseStatus(HttpStatus.CREATED)
+    AdminCampaignTargetPreview.Receipt createFromTargetPreview(
+            @CookieValue(name = SESSION, required = false) String session,
+            @RequestHeader(name = "Idempotency-Key", required = false) String key,
+            @RequestBody AdminCampaignTargetPreview.Draft draft) {
+        return targets.create(operator(session), draft, key);
     }
 
     @GetMapping("/{id}/deliveries")

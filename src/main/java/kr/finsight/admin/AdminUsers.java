@@ -115,6 +115,13 @@ class AdminUsers {
                 """ + query.source()).params(query.parameters()).param("preview", preview).update();
     }
 
+    int snapshotCampaignMatches(UUID preview, Filters filters) {
+        var query = filterQuery(filters);
+        return db.sql("""
+                INSERT INTO campaign_target_preview_user(preview_id,user_id,data_epoch) SELECT :preview,u.id,u.content_event_epoch
+                """ + query.source()).params(query.parameters()).param("preview", preview).update();
+    }
+
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     Optional<Detail> detail(UUID id) {
         return db.sql("SELECT " + USER_COLUMNS + ", p.attributes AS profile " + USER_SOURCE + " WHERE u.id = :id")
