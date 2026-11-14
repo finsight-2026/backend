@@ -1105,6 +1105,26 @@ class AdminAuthIntegrationTest {
 
     @Test
     @org.springframework.transaction.annotation.Transactional
+    void maskedUserFileIsNotReturnedWhenAuditInsertFails() throws Exception {
+        var operator = noteAdmin("OPERATOR");
+        var session = monitorSession(operator);
+        var user = dashboardAccount(java.time.OffsetDateTime.now(), false, "ACTIVE");
+        var job = dashboardExports.requestUsers(operator, null, java.util.List.of(user), "audit-failure");
+        dashboardExports.process(job.id());
+        var link = dashboardExports.issue(operator, job.id());
+        var request = java.net.URI.create(link.url());
+        http.perform(get(request).cookie(session)).andExpect(status().isOk());
+        db.sql("""
+                ALTER TABLE audit_log ADD CONSTRAINT test_reject_download_audit
+                CHECK (action <> 'MASKED_USERS_EXPORT_DOWNLOADED') NOT VALID
+                """).update();
+        var failure = assertThrows(jakarta.servlet.ServletException.class,
+                () -> http.perform(get(request).cookie(session)));
+        assertInstanceOf(org.springframework.dao.DataIntegrityViolationException.class, failure.getCause());
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
     void maskedUserExportPinsMembershipAndRequiresTheOwningOperator() throws Exception {
         var operator = noteAdmin("OPERATOR");
         var analyst = noteAdmin("ANALYST");
