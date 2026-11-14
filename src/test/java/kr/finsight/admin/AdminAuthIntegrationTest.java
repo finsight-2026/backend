@@ -1255,6 +1255,32 @@ class AdminAuthIntegrationTest {
 
     @Test
     @org.springframework.transaction.annotation.Transactional
+    void maskedUserExportConfirmsOnlyItsOwnSnapshot() throws Exception {
+        var operator = noteAdmin("OPERATOR");
+        var other = noteAdmin("OPERATOR");
+        monitorSession(operator);
+        monitorSession(other);
+        var now = java.time.OffsetDateTime.now();
+        var user = dashboardAccount(now, false, "ACTIVE");
+        var day = now.atZoneSameInstant(AdminUsers.KST).toLocalDate();
+        var filter = new AdminUsers.Filters(null, null, null, "30_PLUS", null, null, day, day, true, 1, 20);
+        var preview = dashboardExports.previewUsers(operator, filter);
+        assertEquals(1, preview.eligible());
+        var later = dashboardAccount(now, false, "ACTIVE");
+        assertEquals(404, assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> dashboardExports.requestUsers(other, null, null, preview.previewId(), "foreign")).getStatusCode().value());
+        var job = dashboardExports.requestUsers(operator, null, null, preview.previewId(), "confirm");
+        assertEquals(job, dashboardExports.requestUsers(operator, null, null, preview.previewId(), "confirm"));
+        assertEquals(java.util.List.of(user), db.sql("SELECT user_id FROM admin_masked_export_user WHERE export_id=:id")
+                .param("id", job.id()).query(UUID.class).list());
+        var changed = dashboardExports.previewUsers(operator, filter);
+        db.sql("DELETE FROM app_user WHERE id=:id").param("id", later).update();
+        assertEquals(409, assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> dashboardExports.requestUsers(operator, null, null, changed.previewId(), "changed")).getStatusCode().value());
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
     void maskedUserExportPinsMembershipAndRequiresTheOwningOperator() throws Exception {
         var operator = noteAdmin("OPERATOR");
         var analyst = noteAdmin("ANALYST");

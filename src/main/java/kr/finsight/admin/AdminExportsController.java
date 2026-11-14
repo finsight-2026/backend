@@ -50,7 +50,7 @@ class AdminExportsController {
     record Download(UUID grantId) {}
     record Cancel(String reason, Kind kind) {}
     record Retry(String reason) {}
-    record UserSelection(AdminBulkTagsController.Filter filter, List<UUID> userIds) {}
+    record UserSelection(AdminBulkTagsController.Filter filter, List<UUID> userIds, UUID previewId) {}
 
     AdminExportsController(AdminAuth auth, AdminDashboardExports aggregates, AdminPiiExports pii, AdminMutationJournal journal) {
         this.auth = auth;
@@ -63,8 +63,15 @@ class AdminExportsController {
     ResponseEntity<AdminDashboardExports.Job> requestUsers(@CookieValue(name = SESSION, required = false) String session,
             @RequestHeader(name = "Idempotency-Key", required = false) String key, @RequestBody UserSelection input) {
         var job = aggregates.requestUsers(auth.identity(session), input.filter() == null ? null : input.filter().toFilters(),
-                input.userIds(), key);
+                input.userIds(), input.previewId(), key);
         return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).body(job);
+    }
+
+    @PostMapping("/exports/masked-users/preview")
+    ResponseEntity<AdminCampaignTargetPreview.Preview> previewUsers(
+            @CookieValue(name = SESSION, required = false) String session, @RequestBody AdminBulkTagsController.Filter filter) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(aggregates.previewUsers(auth.identity(session), filter.toFilters()));
     }
 
     @PostMapping("/exports")

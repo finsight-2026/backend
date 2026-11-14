@@ -77,14 +77,43 @@ class AdminDashboardExports {
 
     @Transactional
     Job requestUsers(AdminAuth.Identity actor, AdminUsers.Filters filter, List<UUID> ids, String key) {
+        return requestUsers(actor, filter, ids, null, key);
+    }
+
+    @Transactional
+    AdminCampaignTargetPreview.Preview previewUsers(AdminAuth.Identity actor, AdminUsers.Filters filter) {
         lockRole(actor, Kind.MASKED_USERS);
-        if ((filter == null) == (ids == null) ||
+        var id = UUID.randomUUID();
+        var expires = db.sql("""
+                INSERT INTO campaign_target_preview(id,actor_id,purpose) VALUES (:id,:actor,'MASKED_EXPORT')
+                RETURNING expires_at
+                """).param("id", id).param("actor", actor.admin().id()).query(OffsetDateTime.class).single();
+        int total = users.snapshotCampaignMatches(id, filter);
+        int excluded = db.sql("""
+                DELETE FROM campaign_target_preview_user t USING app_user u
+                WHERE t.preview_id=:id AND t.user_id=u.id AND u.status='DATA_DELETION_PENDING'
+                """).param("id", id).update();
+        db.sql("UPDATE campaign_target_preview SET total=:total,eligible=:eligible WHERE id=:id")
+                .param("id", id).param("total", total).param("eligible", total - excluded).update();
+        return new AdminCampaignTargetPreview.Preview(id, total, total - excluded, excluded, expires);
+    }
+
+    @Transactional
+    Job requestUsers(AdminAuth.Identity actor, AdminUsers.Filters filter, List<UUID> ids, UUID previewId, String key) {
+        lockRole(actor, Kind.MASKED_USERS);
+        if ((previewId == null && (filter == null) == (ids == null))
+                || (previewId != null && (filter != null || ids != null)) ||
                 (ids != null && (ids.isEmpty() || ids.size() > 100 || ids.stream().anyMatch(java.util.Objects::isNull)
                         || ids.stream().distinct().count() != ids.size()))) {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY);
         }
-        var selection = ids == null ? filter : ids.stream().sorted().toList();
+        var selection = previewId != null ? previewId : ids == null ? filter : ids.stream().sorted().toList();
         return journal.once(actor, "/exports/masked-users", key, selection, Job.class, () -> {
+            int expected = previewId == null ? 0 : db.sql("""
+                    SELECT eligible FROM campaign_target_preview
+                    WHERE id=:id AND actor_id=:actor AND purpose='MASKED_EXPORT' AND expires_at>clock_timestamp() FOR UPDATE
+                    """).param("id", previewId).param("actor", actor.admin().id()).query(Integer.class).optional()
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
             var id = UUID.randomUUID();
             var hash = AdminAuth.hash(json.writeValueAsString(selection));
             var job = db.sql("""
@@ -94,13 +123,22 @@ class AdminDashboardExports {
                     DO UPDATE SET id=admin_dashboard_export.id RETURNING id,status,format
                     """).param("id", id).param("owner", actor.admin().id()).param("hash", hash).query(Job.class).single();
             if (!job.id().equals(id)) return job;
-            int count = filter != null ? users.snapshotExportMatches(id, filter) : db.sql("""
+            int count = previewId != null ? db.sql("""
+                    INSERT INTO admin_masked_export_user(export_id,user_id,data_epoch)
+                    SELECT :id,u.id,u.content_event_epoch FROM campaign_target_preview_user t
+                    JOIN app_user u ON u.id=t.user_id AND u.content_event_epoch=t.data_epoch
+                    WHERE t.preview_id=:preview AND u.status<>'DATA_DELETION_PENDING' FOR SHARE OF u
+                    """).param("id", id).param("preview", previewId).update() : filter != null
+                    ? users.snapshotExportMatches(id, filter) : db.sql("""
                     INSERT INTO admin_masked_export_user(export_id,user_id,data_epoch)
                     SELECT :id,u.id,u.content_event_epoch FROM app_user u
                     WHERE u.status<>'DATA_DELETION_PENDING'
                     AND u.id IN (SELECT value::uuid FROM jsonb_array_elements_text(CAST(:ids AS jsonb)))
                     """).param("id", id).param("ids", json.writeValueAsString(ids)).update();
-            if (count == 0 || (ids != null && count != ids.size())) throw new ResponseStatusException(HttpStatus.CONFLICT);
+            if (count == 0 || (previewId != null && count != expected) || (ids != null && count != ids.size())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT);
+            }
+            if (previewId != null) db.sql("DELETE FROM campaign_target_preview WHERE id=:id").param("id", previewId).update();
             db.sql("UPDATE admin_dashboard_export SET user_selection_count=:count WHERE id=:id")
                     .param("count", count).param("id", id).update();
             journal.append(actor, auditAction(Kind.MASKED_USERS, "REQUESTED"), "JOB", id.toString(), Map.of("count", count));

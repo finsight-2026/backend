@@ -50,7 +50,7 @@ class AdminCampaignTargetPreview {
             var id = draft.previewId();
             int expected = db.sql("""
                     SELECT eligible FROM campaign_target_preview
-                    WHERE id=:id AND actor_id=:actor AND expires_at>clock_timestamp() FOR UPDATE
+                    WHERE id=:id AND actor_id=:actor AND purpose='CAMPAIGN' AND expires_at>clock_timestamp() FOR UPDATE
                     """).param("id", id).param("actor", actor.admin().id()).query(Integer.class).optional()
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
             var ids = db.sql("""
