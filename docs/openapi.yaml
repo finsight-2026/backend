@@ -830,8 +830,8 @@ paths:
                   headerName: {type: string}
   /api/v1/admin/auth/login:
     post:
-      summary: 관리자 비밀번호 확인과 MFA 도전 발급
-      description: 비밀번호가 맞으면 5분 동안 사용할 MFA 도전을 반환한다. 세션은 MFA 완료 후 발급한다.
+      summary: 관리자 비밀번호 확인과 세션 또는 MFA 도전 발급
+      description: 서버에 지정된 계정에서 새 로그인 형식을 요청하면 비밀번호 확인 후 세션을 발급한다. 그 외에는 5분 동안 사용할 MFA 도전을 반환한다. 비밀번호 로그인은 민감 작업의 최근 MFA 요건을 충족하지 않는다.
       parameters:
         - $ref: '#/components/parameters/AdminCsrfToken'
       requestBody:
@@ -844,17 +844,24 @@ paths:
               properties:
                 email: {type: string, format: email, maxLength: 254}
                 password: {type: string, format: password, minLength: 1, maxLength: 128}
+                passwordSessionSupported: {type: boolean, default: false}
       responses:
         '200':
-          description: MFA 도전 ID와 만료 시각
+          description: MFA 도전 ID와 만료 시각 또는 관리자 정보와 세션 쿠키
+          headers:
+            Set-Cookie:
+              description: 비밀번호 세션이 발급된 경우 관리자 세션 쿠키
+              schema: {type: string}
           content:
             application/json:
               schema:
-                type: object
-                required: [challengeId, expiresAt]
-                properties:
-                  challengeId: {type: string, format: uuid}
-                  expiresAt: {type: string, format: date-time}
+                oneOf:
+                  - type: object
+                    required: [challengeId, expiresAt]
+                    properties:
+                      challengeId: {type: string, format: uuid}
+                      expiresAt: {type: string, format: date-time}
+                  - $ref: '#/components/schemas/AdminIdentity'
         '400': {description: 입력 형식 오류}
         '401': {description: 활성 관리자 계정의 자격 증명 확인 실패}
         '403': {description: CSRF 또는 출처 검사 실패}
