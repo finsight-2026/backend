@@ -11,6 +11,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -23,11 +24,11 @@ import org.springframework.web.server.ResponseStatusException;
 @Profile("local")
 class AdminAuth {
     record Challenge(UUID challengeId, OffsetDateTime expiresAt) {}
-    record Login(Challenge challenge, boolean limited) {}
+    record Login(Challenge challenge, Verified session, boolean limited) {}
     record Admin(UUID id, String name) {}
     record Identity(Admin admin, List<String> permissions) {}
     record Verified(String token, Identity identity, boolean limited) {}
-    private record PasswordRow(UUID id, String hash) {}
+    private record PasswordRow(UUID id, String hash, long version) {}
     private record MfaRow(UUID adminId, byte[] secret, long lastStep, long version,
                           int failures, OffsetDateTime blockedUntil) {}
 
@@ -35,15 +36,18 @@ class AdminAuth {
     private final AdminTotp totp;
     private final AdminMutationJournal journal;
     private final AdminPasswordPolicy passwordPolicy;
+    private final String passwordOnlyEmail;
     private final SecureRandom random = new SecureRandom();
     private final Pbkdf2PasswordEncoder passwords = Pbkdf2PasswordEncoder.defaultsForSpringSecurity_v5_8();
     private final String dummy = passwords.encode(UUID.randomUUID().toString());
 
-    AdminAuth(JdbcClient db, AdminTotp totp, AdminMutationJournal journal, AdminPasswordPolicy passwordPolicy) {
+    AdminAuth(JdbcClient db, AdminTotp totp, AdminMutationJournal journal, AdminPasswordPolicy passwordPolicy,
+              @Value("${finsight.admin.password-only-email:}") String passwordOnlyEmail) {
         this.db = db;
         this.totp = totp;
         this.journal = journal;
         this.passwordPolicy = passwordPolicy;
+        this.passwordOnlyEmail = normalize(passwordOnlyEmail);
     }
 
     @Transactional
@@ -66,7 +70,7 @@ class AdminAuth {
     }
 
     @Transactional
-    Login login(String address, String password, String ip) {
+    Login login(String address, String password, String ip, boolean passwordSessionSupported) {
         var email = normalize(address);
         lock("admin:ip:" + ip);
         lock("admin:email:" + email);
@@ -74,14 +78,14 @@ class AdminAuth {
         var requests = db.sql("""
                 SELECT count(*) FROM admin_login_request WHERE source_ip = :ip AND requested_at > :cutoff
                 """).param("ip", ip).param("cutoff", now.minusMinutes(15)).query(Integer.class).single();
-        if (requests >= 30) return new Login(null, true);
+        if (requests >= 30) return new Login(null, null, true);
         db.sql("INSERT INTO admin_login_request VALUES (:ip, :now)").param("ip", ip).param("now", now).update();
         if (db.sql("SELECT EXISTS(SELECT 1 FROM admin_login_failure WHERE email = :email AND blocked_until > :now)")
-                .param("email", email).param("now", now).query(Boolean.class).single()) return new Login(null, true);
+                .param("email", email).param("now", now).query(Boolean.class).single()) return new Login(null, null, true);
         var account = db.sql("""
-                SELECT id,password_hash FROM admin_account WHERE email = :email AND status = 'ACTIVE' FOR UPDATE
+                SELECT id,password_hash,session_version FROM admin_account WHERE email = :email AND status = 'ACTIVE' FOR UPDATE
                 """).param("email", email)
-                .query((row, index) -> new PasswordRow(row.getObject(1, UUID.class), row.getString(2))).optional();
+                .query((row, index) -> new PasswordRow(row.getObject(1, UUID.class), row.getString(2), row.getLong(3))).optional();
         var matches = passwords.matches(password, account.map(PasswordRow::hash).orElse(dummy));
         if (!matches || account.isEmpty()) {
             var failures = db.sql("""
@@ -93,16 +97,22 @@ class AdminAuth {
                             AND admin_login_failure.failures = 4 THEN :until END
                     RETURNING failures
                     """).param("email", email).param("until", now.plusMinutes(15)).query(Integer.class).single();
-            return new Login(null, failures == 5);
+            return new Login(null, null, failures == 5);
         }
         db.sql("DELETE FROM admin_login_failure WHERE email = :email").param("email", email).update();
-        var id = account.orElseThrow().id();
-        var challenge = new Challenge(UUID.randomUUID(), now.plusMinutes(5));
+        var authenticated = account.orElseThrow();
+        var id = authenticated.id();
         db.sql("UPDATE admin_auth_challenge SET used_at = :now WHERE admin_id = :id AND used_at IS NULL")
                 .param("id", id).param("now", now).update();
+        if (passwordSessionSupported && email.equals(passwordOnlyEmail)) {
+            var session = createSession(id, authenticated.version(), now, false);
+            journal.append(session.identity(), "ADMIN_PASSWORD_LOGIN", "ADMIN_ACCOUNT", id.toString(), java.util.Map.of());
+            return new Login(null, session, false);
+        }
+        var challenge = new Challenge(UUID.randomUUID(), now.plusMinutes(5));
         db.sql("INSERT INTO admin_auth_challenge (id,admin_id,expires_at) VALUES (:challenge,:id,:expiry)")
                 .param("challenge", challenge.challengeId()).param("id", id).param("expiry", challenge.expiresAt()).update();
-        return new Login(challenge, false);
+        return new Login(challenge, null, false);
     }
 
     @Transactional
@@ -143,16 +153,21 @@ class AdminAuth {
                 .param("step", recovered ? state.lastStep() : step).param("id", state.adminId()).update();
         db.sql("UPDATE admin_auth_challenge SET used_at = :now WHERE id = :id")
                 .param("now", now).param("id", challenge).update();
+        var session = createSession(state.adminId(), state.version(), now, !recovered);
+        if (recovered) journal.append(session.identity(), "ADMIN_RECOVERY_CODE_USED", "ADMIN_ACCOUNT",
+                state.adminId().toString(), java.util.Map.of());
+        return session;
+    }
+
+    private Verified createSession(UUID adminId, long version, OffsetDateTime now, boolean recentlyVerified) {
         var bytes = new byte[32];
         random.nextBytes(bytes);
         var token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
         db.sql("INSERT INTO admin_session VALUES (:hash,:id,:now,:now,:reauth,:expiry,:version)")
-                .param("hash", hash(token)).param("id", state.adminId()).param("now", now)
-                .param("reauth", recovered ? now.minusMinutes(6) : now)
-                .param("expiry", now.plusHours(8)).param("version", state.version()).update();
-        var identity = identity(token);
-        if (recovered) journal.append(identity, "ADMIN_RECOVERY_CODE_USED", "ADMIN_ACCOUNT", state.adminId().toString(), java.util.Map.of());
-        return new Verified(token, identity, false);
+                .param("hash", hash(token)).param("id", adminId).param("now", now)
+                .param("reauth", recentlyVerified ? now : now.minusMinutes(6))
+                .param("expiry", now.plusHours(8)).param("version", version).update();
+        return new Verified(token, identity(token), false);
     }
 
     Identity identity(String token) {
