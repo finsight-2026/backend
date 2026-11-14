@@ -105,10 +105,10 @@ class AdminComparisonController {
             @CookieValue(name = AdminAuthController.SESSION_COOKIE, required = false) String session,
             @PathVariable YfsiScoring.Pressure type, @Valid @RequestBody Minimum request) {
         var actor = require(session, "SUPER_ADMIN");
-        if (!auth.recentlyVerified(session, actor.admin().id())) throw new ResponseStatusException(HttpStatus.FORBIDDEN);
-        return journal.record(actor, "COMPARISON_MINIMUM_CHANGED", "COMPARISON_DATASET", type.name(),
-                () -> publishing.updateMinimum(type, request.minimum(), request.expectedVersion(), request.reason()),
-                settings -> Map.of("version", settings.version(), "minimumConfigured", settings.minimum() != null));
+        return journal.record(actor, "COMPARISON_MINIMUM_CHANGED", "COMPARISON_DATASET", type.name(), () -> {
+            auth.lockVerifiedSupervisor(actor, session);
+            return publishing.updateMinimum(type, request.minimum(), request.expectedVersion(), request.reason());
+        }, settings -> Map.of("version", settings.version(), "minimumConfigured", settings.minimum() != null));
     }
 
     private AdminAuth.Identity require(String session, String... roles) {

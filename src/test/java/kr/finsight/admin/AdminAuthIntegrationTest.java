@@ -1800,6 +1800,40 @@ class AdminAuthIntegrationTest {
         assertEquals(0, db.sql("SELECT count(*) FROM admin_session").query(Integer.class).single());
     }
 
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void comparisonMinimumRequiresRecentMfaBeforeChangingSettings() throws Exception {
+        var supervisor = noteAdmin("SUPER_ADMIN");
+        var session = monitorSession(supervisor);
+        var operatorSession = monitorSession(noteAdmin("OPERATOR"));
+        var csrf = http.perform(get(PATH + "/csrf").secure(true)).andExpect(status().isOk()).andReturn().getResponse();
+        var token = json.readTree(csrf.getContentAsString());
+        var csrfCookie = csrf.getCookie("__Secure-FINSIGHT_ADMIN_CSRF");
+        var version = db.sql("SELECT settings_version FROM comparison_dataset WHERE type='DEBT'")
+                .query(Long.class).single();
+        var update = Map.of("expectedVersion", version, "minimum", 35, "reason", "최소 표본 기준 검증 사유");
+        var path = "/api/v1/admin/comparison-snapshots/settings/DEBT";
+        java.util.function.Function<jakarta.servlet.http.Cookie, MockHttpServletRequestBuilder> write = cookie ->
+                patch(path).secure(true).header("Origin", ORIGIN).cookie(csrfCookie, cookie)
+                        .header(token.get("headerName").asString(), token.get("token").asString()).contentType("application/json");
+        postJson(write.apply(operatorSession), update).andExpect(status().isForbidden());
+        db.sql("UPDATE admin_session SET reauth_at=now()-interval '6 minutes' WHERE admin_id=:id")
+                .param("id", supervisor.admin().id()).update();
+        postJson(write.apply(session), update).andExpect(status().isPreconditionRequired());
+        assertEquals(version, db.sql("SELECT settings_version FROM comparison_dataset WHERE type='DEBT'")
+                .query(Long.class).single());
+
+        db.sql("UPDATE admin_account SET totp_secret_encrypted=:secret WHERE id=:id")
+                .param("secret", totp.encrypt(AdminTotp.decodeBase32(SEED))).param("id", supervisor.admin().id()).update();
+        var code = AdminTotp.codeAt(AdminTotp.decodeBase32(SEED), Instant.now().getEpochSecond() / 30);
+        postJson(post(PATH + "/reauth").secure(true).header("Origin", ORIGIN).cookie(csrfCookie, session)
+                        .header(token.get("headerName").asString(), token.get("token").asString()).contentType("application/json"),
+                Map.of("code", code)).andExpect(status().isNoContent());
+        postJson(write.apply(session), update).andExpect(status().isOk())
+                .andExpect(jsonPath("$.minimum").value(35)).andExpect(jsonPath("$.version").value(version + 1));
+        postJson(write.apply(session), update).andExpect(status().isConflict());
+    }
+
     private ResultActions postJson(MockHttpServletRequestBuilder request, Object body) throws Exception {
         return http.perform(request.content(json.writeValueAsString(body)));
     }
