@@ -37,6 +37,8 @@ class AdminAuthIntegrationTest {
     @Autowired AdminAuth auth;
     @Autowired AdminTotp totp;
     @Autowired JdbcClient db;
+    @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
+    @Autowired org.springframework.transaction.support.TransactionTemplate transactions;
     @Autowired MockMvc http;
     @Autowired JsonMapper json;
     @Autowired AdminDashboard dashboard;
@@ -627,6 +629,64 @@ class AdminAuthIntegrationTest {
         return notices.transition(actor, row.id(),
                 new AdminNotices.Change(row.revisionId(), action, row.version(), null, starts, ends, confirmed),
                 row.revisionId() + "-" + action + "-" + confirmed);
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void auditWriteFailureRollsBackPublicationAndCampaignConfirmation() {
+        var operator = noteAdmin("OPERATOR");
+        var reviewer = noteAdmin("SUPER_ADMIN");
+        var now = java.time.OffsetDateTime.now();
+        var firstDraft = notices.draft(operator, null, null,
+                new AdminNotices.Fields("점검 안내", "이용 시간 안내", "서비스 점검이 예정되어 있습니다.", 0));
+        var firstReview = noticeTransition(operator, firstDraft, AdminNotices.Action.SUBMIT, null, null, false);
+        var firstApproval = noticeTransition(reviewer, firstReview, AdminNotices.Action.APPROVE, null, null, false);
+        var live = noticeTransition(reviewer, firstApproval, AdminNotices.Action.PUBLISH, null, null, true);
+        var draft = notices.draft(operator, live.id(), live.revisionId(), null);
+        var review = noticeTransition(operator, draft, AdminNotices.Action.SUBMIT, null, null, false);
+        var approved = noticeTransition(reviewer, review, AdminNotices.Action.APPROVE, null, null, false);
+
+        var user = dashboardAccount(now, false, "ACTIVE");
+        db.sql("INSERT INTO app_notification_preference(user_id,enabled) VALUES (:user,true)").param("user", user).update();
+        var scheduled = AdminCampaigns.executionTime(now.plusDays(1), null);
+        var campaign = campaigns.create(operator, new AdminCampaigns.Fields("점검 캠페인", null, null,
+                java.util.List.of(user), AdminCampaigns.TEMPLATE, live.revisionId(), scheduled));
+        var preview = campaigns.preview(operator, campaign.id(), campaign.version());
+        assertEquals(1, preview.counts().localEligible());
+
+        db.sql("""
+                ALTER TABLE audit_log ADD CONSTRAINT test_reject_publication_and_campaign_audit
+                CHECK (action NOT IN ('NOTICE_PUBLISH','CRM_CAMPAIGN_CONFIRMED')) NOT VALID
+                """).update();
+        // Use savepoints to inspect the rolled-back writes in the same isolated test transaction.
+        transactions.executeWithoutResult(tx -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            assertFalse(tx.isRollbackOnly());
+            var savepoint = connection.setSavepoint();
+            var publicationFailure = assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+                    () -> noticeTransition(reviewer, approved, AdminNotices.Action.PUBLISH, null, null, true));
+            assertTrue(publicationFailure.getMostSpecificCause().getMessage().contains("test_reject_publication_and_campaign_audit"));
+            assertTrue(tx.isRollbackOnly());
+            connection.rollback(savepoint);
+            assertEquals(live.revisionId(), notices.list(AdminNotices.Status.PUBLISHED, "점검 안내").getFirst().revisionId());
+            assertEquals("APPROVED", db.sql("SELECT status FROM service_notice_revision WHERE id=:id")
+                    .param("id", approved.revisionId()).query(String.class).single());
+            assertEquals(1, db.sql("SELECT count(*) FROM service_notice_publication_event WHERE notice_id=:id")
+                    .param("id", live.id()).query(Integer.class).single());
+
+            savepoint = connection.setSavepoint();
+            var confirmationFailure = assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+                    () -> campaigns.confirm(operator, campaign.id(), preview.previewId(), campaign.version()));
+            assertTrue(confirmationFailure.getMostSpecificCause().getMessage().contains("test_reject_publication_and_campaign_audit"));
+            connection.rollback(savepoint);
+            var unchanged = campaigns.list().stream().filter(item -> item.id().equals(campaign.id())).findFirst().orElseThrow();
+            assertEquals("DRAFT", unchanged.status());
+            assertEquals(campaign.version(), unchanged.version());
+            assertTrue(db.sql("SELECT used_at IS NULL FROM campaign_preview WHERE id=:id")
+                    .param("id", preview.previewId()).query(Boolean.class).single());
+            assertEquals(0, db.sql("SELECT count(*) FROM campaign_job WHERE campaign_id=:id")
+                    .param("id", campaign.id()).query(Integer.class).single());
+            return null;
+        }));
     }
 
     @Test
