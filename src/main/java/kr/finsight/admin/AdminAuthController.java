@@ -25,7 +25,7 @@ import org.springframework.web.server.ResponseStatusException;
 class AdminAuthController {
     static final String SESSION_COOKIE = "__Secure-FINSIGHT_ADMIN";
     record Credentials(@NotBlank @Email @Size(max = 254) String email,
-                       @NotBlank @Size(max = 128) String password) {}
+                       @NotBlank @Size(max = 128) String password, Boolean passwordSessionSupported) {}
     record Mfa(@NotNull UUID challengeId, @Pattern(regexp = "[0-9]{6}") String code,
                @Pattern(regexp = "[A-Z2-7]{16}") String recoveryCode) {}
 
@@ -43,11 +43,13 @@ class AdminAuthController {
     }
 
     @PostMapping("/login")
-    AdminAuth.Challenge login(@Valid @RequestBody Credentials request, HttpServletRequest http) {
-        var result = auth.login(request.email(), request.password(), http.getRemoteAddr());
+    ResponseEntity<?> login(@Valid @RequestBody Credentials request, HttpServletRequest http) {
+        var result = auth.login(request.email(), request.password(), http.getRemoteAddr(),
+                Boolean.TRUE.equals(request.passwordSessionSupported()));
         if (result.limited()) throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS);
+        if (result.session() != null) return sessionResponse(result.session());
         if (result.challenge() == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
-        return result.challenge();
+        return ResponseEntity.ok(result.challenge());
     }
 
     @PostMapping("/mfa")
@@ -58,8 +60,12 @@ class AdminAuthController {
         var result = auth.verify(request.challengeId(), request.code(), request.recoveryCode());
         if (result.limited()) throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS);
         if (result.token() == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
+        return sessionResponse(result);
+    }
+
+    private static ResponseEntity<AdminAuth.Identity> sessionResponse(AdminAuth.Verified session) {
         return ResponseEntity.ok().header(HttpHeaders.SET_COOKIE,
-                cookie(result.token(), Duration.ofHours(8)).toString()).body(result.identity());
+                cookie(session.token(), Duration.ofHours(8)).toString()).body(session.identity());
     }
 
     @PostMapping("/reauth")

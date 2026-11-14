@@ -26,6 +26,7 @@ import tools.jackson.databind.json.JsonMapper;
 @SpringBootTest(properties = {
         "finsight.auth.jwt-key=" + "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
         "finsight.signup.code-key=" + "abababababababababababababababababababababababababababababababab",
+        "finsight.admin.password-only-email=password-only@example.test",
         "finsight.admin.mfa-key=" + "edededededededededededededededededededededededededededededededed",
         "finsight.admin.note-key=" + "1212121212121212121212121212121212121212121212121212121212121212",
         "finsight.admin.pii-key=" + "3434343434343434343434343434343434343434343434343434343434343434"
@@ -2078,6 +2079,60 @@ class AdminAuthIntegrationTest {
         http.perform(write.apply("/activity").cookie(session)).andExpect(status().isUnauthorized());
         http.perform(write.apply("/logout").cookie(session)).andExpect(status().isNoContent());
         assertEquals(0, db.sql("SELECT count(*) FROM admin_session").query(Integer.class).single());
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void passwordOnlyLoginRequiresConfiguredActiveAccountAndDoesNotSatisfyRecentMfa() throws Exception {
+        var email = "password-only@example.test";
+        var password = "LocalExamplePassword123!";
+        var admin = UUID.randomUUID();
+        var other = UUID.randomUUID();
+        var hash = auth.passwordHash(password);
+        for (var entry : Map.of(email, admin, "other-mfa@example.test", other).entrySet()) {
+            db.sql("""
+                    INSERT INTO admin_account (id,email,name,password_hash,totp_secret_encrypted,status)
+                    VALUES (:id,:email,'테스트',:hash,:secret,'ACTIVE')
+                    """).param("id", entry.getValue()).param("email", entry.getKey()).param("hash", hash)
+                    .param("secret", totp.encrypt(AdminTotp.decodeBase32(SEED))).update();
+            db.sql("INSERT INTO admin_role VALUES (:id,'SUPER_ADMIN')").param("id", entry.getValue()).update();
+        }
+        var csrf = http.perform(get(PATH + "/csrf").secure(true)).andExpect(status().isOk()).andReturn().getResponse();
+        var csrfBody = json.readTree(csrf.getContentAsString());
+        var csrfCookie = csrf.getCookie("__Secure-FINSIGHT_ADMIN_CSRF");
+        java.util.function.Function<String, MockHttpServletRequestBuilder> write = endpoint ->
+                post(PATH + endpoint).secure(true).header("Origin", ORIGIN).cookie(csrfCookie)
+                        .header(csrfBody.get("headerName").asString(), csrfBody.get("token").asString())
+                        .contentType("application/json");
+
+        postJson(write.apply("/login"), Map.of("email", email, "password", "invalid", "passwordSessionSupported", true))
+                .andExpect(status().isUnauthorized()).andExpect(cookie().doesNotExist(AdminAuthController.SESSION_COOKIE));
+        postJson(write.apply("/login"), Map.of("email", email, "password", password))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.challengeId").exists())
+                .andExpect(cookie().doesNotExist(AdminAuthController.SESSION_COOKIE));
+        postJson(write.apply("/login"), Map.of("email", "other-mfa@example.test", "password", password,
+                "passwordSessionSupported", true)).andExpect(status().isOk()).andExpect(jsonPath("$.challengeId").exists())
+                .andExpect(cookie().doesNotExist(AdminAuthController.SESSION_COOKIE));
+        var login = postJson(write.apply("/login"), Map.of("email", email, "password", password,
+                "passwordSessionSupported", true)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.admin.id").value(admin.toString())).andExpect(jsonPath("$.challengeId").doesNotExist())
+                .andReturn();
+        var session = login.getResponse().getCookie(AdminAuthController.SESSION_COOKIE);
+        assertNotNull(session);
+        assertTrue(session.isHttpOnly());
+        assertTrue(session.getSecure());
+        assertEquals("Strict", session.getAttribute("SameSite"));
+        http.perform(get(PATH + "/me").cookie(session)).andExpect(status().isOk());
+        assertFalse(auth.recentlyVerified(session.getValue(), admin));
+        var code = AdminTotp.codeAt(AdminTotp.decodeBase32(SEED), Instant.now().getEpochSecond() / 30);
+        postJson(write.apply("/reauth").cookie(session), Map.of("code", code)).andExpect(status().isNoContent());
+        assertTrue(auth.recentlyVerified(session.getValue(), admin));
+        http.perform(write.apply("/logout").cookie(session)).andExpect(status().isNoContent());
+        http.perform(get(PATH + "/me").cookie(session)).andExpect(status().isUnauthorized());
+
+        db.sql("UPDATE admin_account SET status='SUSPENDED' WHERE id=:id").param("id", admin).update();
+        postJson(write.apply("/login"), Map.of("email", email, "password", password, "passwordSessionSupported", true))
+                .andExpect(status().isUnauthorized()).andExpect(cookie().doesNotExist(AdminAuthController.SESSION_COOKIE));
     }
 
     private ResultActions postJson(MockHttpServletRequestBuilder request, Object body) throws Exception {
