@@ -154,7 +154,9 @@ class ComparisonBuildTest {
                 INSERT INTO comparison_snapshot
                     (id,type,period_start,period_end,formula_version,dataset_version,sample_n,metrics,status,created_by)
                 SELECT :id,type,current_date-29,current_date,'yfsi-v1',version,30,
-                    '{"YFSI_MEAN":{"n":30,"mean":50}}','IN_REVIEW',:actor
+                    '{"YFSI_MEAN":{"n":30,"mean":50},"EXTERNAL_AREA_MEAN":{
+                        "DEBT":{"n":30,"mean":45},"INCOME":{"n":29,"mean":60},"FAMILY":{"n":31,"mean":80}
+                    }}','IN_REVIEW',:actor
                 FROM comparison_dataset WHERE type = 'FAMILY'
                 """).param("id", id).param("actor", actor).update();
         var now = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC);
@@ -163,13 +165,23 @@ class ComparisonBuildTest {
                 "단독 운영으로 집계 승인", null);
         assertThrows(org.springframework.web.server.ResponseStatusException.class,
                 () -> publishing.transition(actor, id, approve));
+        assertTrue(publishing.preview(id).metrics().isEmpty());
         publishing.updateMinimum(YfsiScoring.Pressure.FAMILY, 30, 0, "공개 표본 기준을 설정합니다");
+        var preview = publishing.preview(id);
+        assertEquals(45, preview.metrics().path("EXTERNAL_AREA_MEAN").path("DEBT").asInt());
+        assertEquals(1, preview.metrics().path("EXTERNAL_AREA_MEAN").size());
+        assertNull(preview.startsAt());
         var noReason = new ComparisonPublishing.Change(ComparisonPublishing.Action.APPROVE, 0L,
                 approve.allowedMetrics(), approve.startsAt(), approve.endsAt(), null, null);
         assertThrows(org.springframework.web.server.ResponseStatusException.class,
                 () -> publishing.transition(actor, id, noReason));
         var approved = publishing.transition(actor, id, approve);
         assertEquals(ComparisonBuild.Status.APPROVED, approved.status());
+        var approvedPreview = publishing.preview(id);
+        assertEquals(approved.version(), approvedPreview.version());
+        assertEquals(1, approvedPreview.metrics().size());
+        assertEquals(50, approvedPreview.metrics().path("YFSI_MEAN").asInt());
+        assertEquals(approve.startsAt().toEpochSecond(), approvedPreview.startsAt().toEpochSecond());
         var published = publishing.transition(actor, id, new ComparisonPublishing.Change(
                 ComparisonPublishing.Action.PUBLISH, approved.version(), null, null, null, null, null));
         assertTrue(publishing.publications().stream().anyMatch(row -> row.snapshotId().equals(id) && row.status().equals("ACTIVE")));

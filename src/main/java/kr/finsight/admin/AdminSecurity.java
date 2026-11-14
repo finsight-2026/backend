@@ -103,7 +103,7 @@ class AdminSecurity {
                         .requestMatchers(HttpMethod.POST, "/api/v1/admin/auth/login", "/api/v1/admin/auth/mfa",
                                 "/api/v1/admin/auth/logout", "/api/v1/admin/auth/activity", "/api/v1/admin/auth/reauth").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/admin/comparison-snapshots",
-                                "/api/v1/admin/comparison-snapshots/*").permitAll()
+                                "/api/v1/admin/comparison-snapshots/*", "/api/v1/admin/comparison-snapshots/*/preview").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/admin/comparison-snapshots",
                                 "/api/v1/admin/comparison-snapshots/*/transitions").permitAll()
                         .requestMatchers(HttpMethod.PATCH, "/api/v1/admin/comparison-snapshots/settings/*").permitAll()

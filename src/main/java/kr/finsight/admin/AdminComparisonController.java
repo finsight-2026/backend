@@ -51,6 +51,13 @@ class AdminComparisonController {
         return comparison.get(id);
     }
 
+    @GetMapping("/{id}/preview")
+    ComparisonPublishing.Preview preview(@CookieValue(name = AdminAuthController.SESSION_COOKIE, required = false) String session,
+                                         @PathVariable UUID id) {
+        require(session, "OPERATOR", "SUPER_ADMIN");
+        return publishing.preview(id);
+    }
+
     @PostMapping
     @ResponseStatus(HttpStatus.ACCEPTED)
     ComparisonBuild.Snapshot build(@CookieValue(name = AdminAuthController.SESSION_COOKIE, required = false) String session,

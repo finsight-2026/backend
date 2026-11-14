@@ -1354,6 +1354,33 @@ paths:
               schema: {$ref: '#/components/schemas/ComparisonSnapshot'}
         '403': {description: 운영자 또는 최고관리자 권한 없음}
         '404': {description: 집계 작업 없음}
+  /api/v1/admin/comparison-snapshots/{id}/preview:
+    get:
+      summary: 익명 비교의 앱 공개 지표 미리보기
+      description: 현재 정책과 표본을 충족하는 지표만 반환한다. 승인된 집계는 승인 지표와 공개 기간을 적용한다.
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: 집계 버전, 공개 가능 지표 및 승인된 기간
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, metrics, startsAt, endsAt]
+                properties:
+                  version: {type: integer, format: int64}
+                  metrics:
+                    type: object
+                    additionalProperties:
+                      oneOf:
+                        - {type: number}
+                        - {type: object, additionalProperties: {type: number}}
+                  startsAt: {type: [string, 'null'], format: date-time}
+                  endsAt: {type: [string, 'null'], format: date-time}
+        '401': {description: 관리자 세션 없음}
+        '403': {description: 운영자 또는 최고관리자 권한 없음}
+        '404': {description: 집계 작업 없음}
   /api/v1/admin/jobs:
     get:
       summary: 역할 범위의 백오피스 작업 목록

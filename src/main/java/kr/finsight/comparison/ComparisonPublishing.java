@@ -25,6 +25,7 @@ public class ComparisonPublishing {
     public record Settings(String type, Integer minimum, long version) {}
     public record Publication(UUID id, UUID snapshotId, String type, String status,
                               OffsetDateTime startsAt, OffsetDateTime endsAt) {}
+    public record Preview(long version, JsonNode metrics, OffsetDateTime startsAt, OffsetDateTime endsAt) {}
     private record Dataset(long version, Integer minSample, long settingsVersion) {}
     private record Approval(UUID author, UUID approver, List<String> metrics,
                             OffsetDateTime starts, OffsetDateTime ends) {}
@@ -80,6 +81,25 @@ public class ComparisonPublishing {
                 SELECT id,snapshot_id,type,status,starts_at,ends_at FROM comparison_publication
                 WHERE status IN ('ACTIVE','SCHEDULED') AND ends_at > now() ORDER BY starts_at,id
                 """).query(Publication.class).list();
+    }
+
+    public Preview preview(UUID id) {
+        return db.sql("""
+                SELECT s.version,s.approved_start,s.approved_end,coalesce((
+                    SELECT jsonb_object_agg(metric.key,value.metric_value)
+                    FROM unnest(CASE WHEN s.status='APPROVED' THEN s.approved_metrics ELSE o.comparison_metrics END) metric(key)
+                    CROSS JOIN LATERAL (
+                        SELECT public_comparison_metric(s.metrics,metric.key,d.min_sample,s.sample_n) AS metric_value
+                    ) value
+                    WHERE metric.key=ANY(o.comparison_metrics) AND value.metric_value IS NOT NULL
+                        AND s.status IN ('READY','IN_REVIEW','APPROVED')
+                        AND d.version=s.dataset_version AND s.sample_n>=d.min_sample
+                ),'{}'::jsonb) AS metrics
+                FROM comparison_snapshot s JOIN comparison_dataset d ON d.type=s.type
+                CROSS JOIN operating_settings o WHERE s.id=:id AND o.singleton
+                """).param("id", id).query((row, n) -> new Preview(row.getLong(1), json.readTree(row.getString("metrics")),
+                        row.getObject("approved_start", OffsetDateTime.class), row.getObject("approved_end", OffsetDateTime.class)))
+                .optional().orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
     }
 
     @Transactional

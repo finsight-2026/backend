@@ -1463,6 +1463,10 @@ class AdminAuthIntegrationTest {
                 FROM comparison_dataset c CROSS JOIN admin_account a WHERE c.type = 'FAMILY'
                 """).param("id", snapshot).update();
         var transition = "/api/v1/admin/comparison-snapshots/" + snapshot + "/transitions";
+        var preview = "/api/v1/admin/comparison-snapshots/" + snapshot + "/preview";
+        http.perform(get(preview)).andExpect(status().isUnauthorized());
+        http.perform(get(preview).cookie(session)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.metrics.YFSI_MEAN").value(50));
         var clock = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC);
         var approval = Map.of("action", "APPROVE", "expectedVersion", 0,
                 "startsAt", clock.minusMinutes(1).toString(), "endsAt", clock.plusHours(1).toString(),
