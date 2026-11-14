@@ -828,6 +828,130 @@ paths:
                 properties:
                   token: {type: string}
                   headerName: {type: string}
+  /api/v1/admin/auth/login:
+    post:
+      summary: 관리자 비밀번호 확인과 MFA 도전 발급
+      description: 비밀번호가 맞으면 5분 동안 사용할 MFA 도전을 반환한다. 세션은 MFA 완료 후 발급한다.
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email, maxLength: 254}
+                password: {type: string, format: password, minLength: 1, maxLength: 128}
+      responses:
+        '200':
+          description: MFA 도전 ID와 만료 시각
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challengeId, expiresAt]
+                properties:
+                  challengeId: {type: string, format: uuid}
+                  expiresAt: {type: string, format: date-time}
+        '400': {description: 입력 형식 오류}
+        '401': {description: 활성 관리자 계정의 자격 증명 확인 실패}
+        '403': {description: CSRF 또는 출처 검사 실패}
+        '429': {description: 로그인 시도 제한}
+  /api/v1/admin/auth/mfa:
+    post:
+      summary: 인증 앱 코드 또는 복구 코드로 관리자 로그인 완료
+      description: 두 코드 중 하나만 제출한다. 복구 코드는 한 번만 사용할 수 있다.
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeId]
+              properties:
+                challengeId: {type: string, format: uuid}
+                code: {type: string, pattern: '^[0-9]{6}$'}
+                recoveryCode: {type: string, pattern: '^[A-Z2-7]{16}$'}
+              oneOf:
+                - required: [code]
+                - required: [recoveryCode]
+      responses:
+        '200':
+          description: 활성 관리자와 부여된 역할
+          headers:
+            Set-Cookie:
+              description: 관리 API 전용 세션 쿠키. Secure, HttpOnly, SameSite=Strict 속성과 최대 8시간 유효기간을 사용한다.
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminIdentity'}
+        '400': {description: 입력 형식 오류}
+        '401': {description: 도전이 만료되었거나 인증에 실패함}
+        '403': {description: CSRF 또는 출처 검사 실패}
+        '422': {description: 두 코드가 함께 입력되었거나 모두 빠짐}
+        '429': {description: MFA 시도 제한}
+  /api/v1/admin/auth/reauth:
+    post:
+      summary: 민감 작업을 위한 최근 MFA 재인증
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: {type: string, pattern: '^[0-9]{6}$'}
+      responses:
+        '204': {description: 최근 MFA 시각 갱신}
+        '400': {description: 입력 형식 오류}
+        '401': {description: 세션 없음 또는 만료}
+        '403': {description: CSRF 또는 출처 검사 실패}
+        '422': {description: 코드 불일치 또는 이미 사용한 코드}
+        '429': {description: 재인증 시도 제한}
+  /api/v1/admin/auth/me:
+    get:
+      summary: 현재 관리자와 역할 조회
+      description: 30분 비활동 또는 최대 8시간이 지나면 세션이 만료된다.
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 세션으로 확인한 관리자와 부여된 역할
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdminIdentity'}
+        '401': {description: 유효한 관리자 세션 없음}
+  /api/v1/admin/auth/activity:
+    post:
+      summary: 관리자 화면 조작 시 비활동 만료 기준 갱신
+      description: 최대 8시간 만료 시각을 바꾸지 않는다. 백그라운드 조회에서는 호출하지 않는다.
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrfToken'
+      responses:
+        '204': {description: 최근 활동 시각 기록}
+        '401': {description: 유효한 관리자 세션 없음}
+        '403': {description: CSRF 또는 출처 검사 실패}
+  /api/v1/admin/auth/logout:
+    post:
+      summary: 관리자 세션과 브라우저 쿠키 종료
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrfToken'
+      responses:
+        '204':
+          description: 로그아웃 완료. 이미 세션이 없어도 같은 응답을 반환한다.
+          headers:
+            Set-Cookie:
+              description: 관리자 세션 쿠키를 만료시킨다.
+              schema: {type: string}
+        '403': {description: CSRF 또는 출처 검사 실패}
   /api/v1/admin/auth/reset-request:
     post:
       operationId: requestAdminPasswordReset
@@ -2147,6 +2271,20 @@ components:
           schema:
             $ref: '#/components/schemas/AppTokens'
   schemas:
+    AdminIdentity:
+      type: object
+      required: [admin, permissions]
+      properties:
+        admin:
+          type: object
+          required: [id, name]
+          properties:
+            id: {type: string, format: uuid}
+            name: {type: string}
+        permissions:
+          type: array
+          uniqueItems: true
+          items: {type: string, enum: [SUPER_ADMIN, OPERATOR, PRIVACY, ANALYST]}
     AppTokens:
       type: object
       required: [accessToken, refreshToken, expiresIn, contentEventEpoch]
