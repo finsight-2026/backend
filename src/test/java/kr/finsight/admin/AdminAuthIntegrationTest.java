@@ -1336,6 +1336,7 @@ class AdminAuthIntegrationTest {
         var now = java.time.OffsetDateTime.now();
         var today = now.atZoneSameInstant(AdminUsers.KST).toLocalDate().toString();
         var user = dashboardAccount(now, false, "ACTIVE");
+        var privateEmail = user + "@example.test";
         var root = "/api/v1/admin/exports";
         var filter = Map.of("from", today, "to", today, "age", "30_PLUS");
         var request = Map.of("kind", "DASHBOARD_AGGREGATE", "filter", filter, "format", "CSV");
@@ -1378,16 +1379,24 @@ class AdminAuthIntegrationTest {
         http.perform(get(java.net.URI.create(csvUrl)).cookie(session)).andExpect(status().isNotFound());
 
         var pdf = read(postJson(write.apply(root, session), pdfRequest).andExpect(status().isAccepted()), "id");
+        var snapshotTime = exportSnapshotTime();
         dashboardExports.process(UUID.fromString(pdf));
         var pdfUrl = read(postJson(write.apply(root + "/" + pdf + "/download", session), Map.of())
                 .andExpect(status().isOk()), "url");
         var pdfBytes = http.perform(get(java.net.URI.create(pdfUrl)).cookie(session)).andExpect(status().isOk())
-                .andExpect(content().contentType("application/pdf")).andReturn().getResponse().getContentAsByteArray();
+                .andExpect(content().contentType("application/pdf")).andExpect(header().string("Cache-Control", "no-store"))
+                .andReturn().getResponse().getContentAsByteArray();
         try (var document = org.apache.pdfbox.Loader.loadPDF(pdfBytes)) {
             assertTrue(document.getNumberOfPages() >= 2);
             var extracted = new org.apache.pdfbox.text.PDFTextStripper().getText(document);
             assertTrue(extracted.contains("FINSIGHT 대시보드 집계"));
             assertTrue(extracted.contains("가입 7일 재방문율"));
+            assertTrue(extracted.contains(today + " ~ " + today));
+            assertTrue(extracted.contains("30_PLUS"));
+            assertTrue(extracted.contains("집계 시각 (KST)"));
+            assertTrue(extracted.contains(snapshotTime));
+            assertFalse(extracted.contains(user.toString()));
+            assertFalse(extracted.contains(privateEmail));
         }
         var cancellable = read(postJson(write.apply(root, session), request).andExpect(status().isAccepted()), "id");
         postJson(write.apply(jobs + "/" + cancellable + "/cancel", session), Map.of("reason", "필터 변경"))
@@ -1560,6 +1569,7 @@ class AdminAuthIntegrationTest {
 
         var pdf = read(postJson(write.apply(exports, session).header("Idempotency-Key", "pdf"), pdfRequest)
                 .andExpect(status().isAccepted()), "id");
+        var snapshotTime = exportSnapshotTime();
         dashboardExports.process(UUID.fromString(pdf));
         var pdfLink = read(postJson(write.apply(exports + "/" + pdf + "/download", session), Map.of())
                 .andExpect(status().isOk()), "url");
@@ -1572,10 +1582,23 @@ class AdminAuthIntegrationTest {
             assertTrue(extracted.contains("잠정 집계"));
             assertTrue(extracted.contains("조회율 분모"));
             assertTrue(extracted.contains(formulaTitle));
+            assertTrue(extracted.contains(date + " ~ " + date));
+            assertTrue(extracted.contains("부채부담형"));
+            assertTrue(extracted.contains("DEBT-1"));
+            assertTrue(extracted.contains("집계 기준 (KST)"));
+            assertTrue(extracted.contains(snapshotTime));
+            assertFalse(extracted.contains("DEBT-2"));
+            assertFalse(extracted.contains(actor.toString()));
+            assertFalse(extracted.contains(viewer + "@example.test"));
         }
         db.sql("INSERT INTO deletion_operation(id,kind,status,completed_at) VALUES (gen_random_uuid(),'DATA_DELETION','COMPLETED',now())").update();
         http.perform(get(java.net.URI.create(pdfLink)).cookie(session)).andExpect(status().isNotFound());
         http.perform(get(jobs + "/" + pdf).cookie(session)).andExpect(jsonPath("$.errorCode").value("SOURCE_CHANGED"));
+    }
+
+    private String exportSnapshotTime() {
+        return db.sql("SELECT now()").query(java.time.OffsetDateTime.class).single()
+                .atZoneSameInstant(AdminUsers.KST).toOffsetDateTime().truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString();
     }
 
     private jakarta.servlet.http.Cookie monitorSession(AdminAuth.Identity admin) throws Exception {
