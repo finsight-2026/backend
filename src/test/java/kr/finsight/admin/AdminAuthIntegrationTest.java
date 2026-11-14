@@ -1444,6 +1444,54 @@ class AdminAuthIntegrationTest {
     }
 
     @Test
+    void aggregateExportRecoversAfterPostgresRejectsArchiveWrite() {
+        var actor = noteAdmin("ANALYST");
+        db.sql("INSERT INTO admin_role VALUES (:id,'ANALYST')").param("id", actor.admin().id()).update();
+        var job = dashboardExports.request(actor, new AdminDashboardExports.Request(
+                AdminDashboardExports.Kind.DASHBOARD_AGGREGATE, null, null, AdminDashboardExports.Format.CSV));
+        try {
+            db.sql("""
+                    CREATE FUNCTION test_reject_admin_archive() RETURNS trigger LANGUAGE plpgsql AS $$
+                    BEGIN RAISE EXCEPTION 'fixture archive storage failure' USING ERRCODE='53000'; END;
+                    $$
+                    """).update();
+            try {
+                db.sql("""
+                        CREATE TRIGGER test_reject_admin_archive BEFORE UPDATE OF archive ON admin_dashboard_export
+                        FOR EACH ROW WHEN (NEW.id='%s'::uuid AND NEW.archive IS NOT NULL)
+                        EXECUTE FUNCTION test_reject_admin_archive()
+                        """.formatted(job.id())).update();
+                dashboardExports.process(job.id());
+                assertTrue(db.sql("""
+                        SELECT status='QUEUED' AND archive IS NULL AND completed_at IS NULL
+                            AND retry_count=1 AND next_run_at>clock_timestamp() AND error_code='EXPORT_BUILD_FAILED'
+                        FROM admin_dashboard_export WHERE id=:id
+                        """).param("id", job.id()).query(Boolean.class).single());
+                assertEquals(404, assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                        () -> dashboardExports.issue(actor, job.id())).getStatusCode().value());
+            } finally {
+                db.sql("DROP TRIGGER IF EXISTS test_reject_admin_archive ON admin_dashboard_export").update();
+                db.sql("DROP FUNCTION test_reject_admin_archive()").update();
+            }
+            db.sql("UPDATE admin_dashboard_export SET next_run_at=clock_timestamp()-interval '1 second' WHERE id=:id")
+                    .param("id", job.id()).update();
+            dashboardExports.process(job.id());
+            assertTrue(db.sql("""
+                    SELECT status='COMPLETED' AND archive IS NOT NULL AND completed_at IS NOT NULL
+                        AND retry_count=1 AND error_code IS NULL
+                    FROM admin_dashboard_export WHERE id=:id
+                    """).param("id", job.id()).query(Boolean.class).single());
+            var link = dashboardExports.issue(actor, job.id());
+            var parameters = org.springframework.web.util.UriComponentsBuilder.fromUriString(link.url()).build().getQueryParams();
+            var file = dashboardExports.download(actor, job.id(), parameters.getFirst("token"), parameters.getFirst("signature"));
+            assertTrue(new String(file.bytes(), java.nio.charset.StandardCharsets.UTF_8).contains("집계 시각 (KST)"));
+        } finally {
+            db.sql("DELETE FROM admin_dashboard_export WHERE id=:id").param("id", job.id()).update();
+            db.sql("DELETE FROM admin_role WHERE admin_id=:id").param("id", actor.admin().id()).update();
+        }
+    }
+
+    @Test
     @org.springframework.transaction.annotation.Transactional
     void aggregateRetryBacksOffAndRequeuesOnlyOwnedRetryableFailuresOnce() throws Exception {
         var actor = noteAdmin("ANALYST");
