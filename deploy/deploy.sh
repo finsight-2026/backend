@@ -56,12 +56,22 @@ check_status() {
   fi
 }
 
+check_admin() {
+  local internal="http://127.0.0.1:$port/api/v1/admin/auth"
+  check_status 200 "$internal/csrf" &&
+    check_status 401 "$internal/me" &&
+    check_status 404 "https://$domain/api/v1/admin/auth/csrf" || return 1
+
+  if [[ "$environment" == production ]]; then
+    local public="https://admin.finsight.life/api/v1/admin/auth"
+    check_status 200 "$public/csrf" && check_status 401 "$public/me"
+  fi
+}
+
 if "${compose[@]}" up -d --wait --wait-timeout 120 backend \
     && check_https /actuator/health \
     && check_https /api/v1/surveys/current \
-    && check_status 200 "http://127.0.0.1:$port/api/v1/admin/auth/csrf" \
-    && check_status 401 "http://127.0.0.1:$port/api/v1/admin/auth/me" \
-    && check_status 404 "https://$domain/api/v1/admin/auth/csrf"; then
+    && check_admin; then
   printf '%s\n' "$image" >.release/current-image.new
   mv -f .release/current-image.new .release/current-image
   exit 0
