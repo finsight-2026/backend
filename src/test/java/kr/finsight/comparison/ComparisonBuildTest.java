@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.UUID;
 import kr.finsight.TestcontainersConfiguration;
 import kr.finsight.diagnosis.YfsiScoring;
@@ -11,8 +12,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.web.server.ResponseStatusException;
 
 @ActiveProfiles("local")
 @Import(TestcontainersConfiguration.class)
@@ -163,18 +166,34 @@ class ComparisonBuildTest {
         var approve = new ComparisonPublishing.Change(ComparisonPublishing.Action.APPROVE, 0L,
                 java.util.List.of("YFSI_MEAN"), now.minusMinutes(1), now.plusHours(1),
                 "단독 운영으로 집계 승인", null);
-        assertThrows(org.springframework.web.server.ResponseStatusException.class,
-                () -> publishing.transition(actor, id, approve));
+        assertEquals(HttpStatus.UNPROCESSABLE_ENTITY,
+                assertThrows(ResponseStatusException.class, () -> publishing.transition(actor, id, approve)).getStatusCode());
         assertTrue(publishing.preview(id).metrics().isEmpty());
         publishing.updateMinimum(YfsiScoring.Pressure.FAMILY, 30, 0, "공개 표본 기준을 설정합니다");
+
+        db.sql("UPDATE comparison_snapshot SET sample_n=29 WHERE id=:id").param("id", id).update();
+        assertTrue(publishing.preview(id).metrics().isEmpty());
+        assertEquals(HttpStatus.UNPROCESSABLE_ENTITY,
+                assertThrows(ResponseStatusException.class, () -> publishing.transition(actor, id, approve)).getStatusCode());
+        assertEquals(ComparisonBuild.Status.IN_REVIEW, build.get(id).status());
+        assertFalse(publishing.publications().stream().anyMatch(row -> row.snapshotId().equals(id)));
+        db.sql("UPDATE comparison_snapshot SET sample_n=30 WHERE id=:id").param("id", id).update();
+
         var preview = publishing.preview(id);
         assertEquals(45, preview.metrics().path("EXTERNAL_AREA_MEAN").path("DEBT").asInt());
         assertEquals(1, preview.metrics().path("EXTERNAL_AREA_MEAN").size());
         assertNull(preview.startsAt());
         var noReason = new ComparisonPublishing.Change(ComparisonPublishing.Action.APPROVE, 0L,
                 approve.allowedMetrics(), approve.startsAt(), approve.endsAt(), null, null);
-        assertThrows(org.springframework.web.server.ResponseStatusException.class,
-                () -> publishing.transition(actor, id, noReason));
+        var noMetrics = new ComparisonPublishing.Change(ComparisonPublishing.Action.APPROVE, 0L,
+                List.of(), approve.startsAt(), approve.endsAt(), approve.reason(), null);
+        var pastEnd = new ComparisonPublishing.Change(ComparisonPublishing.Action.APPROVE, 0L,
+                approve.allowedMetrics(), now.minusHours(1), now.minusMinutes(1), approve.reason(), null);
+        for (var invalid : List.of(noReason, noMetrics, pastEnd)) {
+            assertEquals(HttpStatus.UNPROCESSABLE_ENTITY,
+                    assertThrows(ResponseStatusException.class, () -> publishing.transition(actor, id, invalid)).getStatusCode());
+            assertEquals(0L, build.get(id).version());
+        }
         var approved = publishing.transition(actor, id, approve);
         assertEquals(ComparisonBuild.Status.APPROVED, approved.status());
         var approvedPreview = publishing.preview(id);
