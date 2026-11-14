@@ -83,6 +83,12 @@ class AdminMutationJournal {
         append(actor.admin().id(), actor.permissions(), action, targetType, targetId, changes);
     }
 
+    @Transactional
+    void recordDownloadDenied(AdminAuth.Identity actor, UUID id, int status) {
+        append(actor.admin().id(), actor.permissions(), "EXPORT_DOWNLOAD_DENIED", "JOB", id.toString(),
+                "FAILURE", Map.of("httpStatus", status));
+    }
+
     void appendServer(UUID accountId, String action, Map<String, ?> changes) {
         var metadata = new LinkedHashMap<String, Object>(changes);
         metadata.put("source", "SERVER_CONSOLE");
@@ -91,13 +97,18 @@ class AdminMutationJournal {
 
     private void append(UUID actorId, java.util.List<String> roles, String action, String targetType, String targetId,
                         Map<String, ?> changes) {
+        append(actorId, roles, action, targetType, targetId, "SUCCESS", changes);
+    }
+
+    private void append(UUID actorId, java.util.List<String> roles, String action, String targetType, String targetId,
+                        String result, Map<String, ?> changes) {
         db.sql("""
                 INSERT INTO audit_log (id,actor_id,roles,action,target_type,target_id,result,changes_safe,trace_id)
                 VALUES (:id,:actor,ARRAY(SELECT jsonb_array_elements_text(CAST(:roles AS jsonb))),
-                    :action,:targetType,:targetId,'SUCCESS',CAST(:changes AS jsonb),:trace)
+                    :action,:targetType,:targetId,:result,CAST(:changes AS jsonb),:trace)
                 """).param("id", UUID.randomUUID()).param("trace", UUID.randomUUID()).param("actor", actorId)
                 .param("roles", json.writeValueAsString(roles)).param("action", action)
-                .param("targetType", targetType).param("targetId", targetId)
+                .param("targetType", targetType).param("targetId", targetId).param("result", result)
                 .param("changes", json.writeValueAsString(changes)).update();
     }
 

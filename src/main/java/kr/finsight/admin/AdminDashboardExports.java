@@ -242,7 +242,7 @@ class AdminDashboardExports {
     File download(AdminAuth.Identity actor, UUID id, String token, String signature) {
         lockRole(actor, ownedKind(actor, id));
         var hash = links.verify(LINK_DOMAIN, id, actor.admin().id(), token, signature);
-        return db.sql("""
+        var file = db.sql("""
                 SELECT e.format,e.archive,e.kind FROM admin_dashboard_export e
                 JOIN admin_dashboard_export_link l ON l.export_id=e.id
                 WHERE e.id=:id AND e.owner_id=:owner AND l.token_hash=:hash
@@ -252,6 +252,8 @@ class AdminDashboardExports {
                 .param("hash", hash)
                 .query((row, n) -> new File(Format.valueOf(row.getString(1)), row.getBytes(2), Kind.valueOf(row.getString(3))))
                 .optional().orElseThrow(AdminDashboardExports::missing);
+        journal.append(actor, auditAction(file.kind(), "DOWNLOADED"), "JOB", id.toString(), Map.of("format", file.format()));
+        return file;
     }
 
     @Scheduled(fixedDelay = 5000, initialDelay = 5000)

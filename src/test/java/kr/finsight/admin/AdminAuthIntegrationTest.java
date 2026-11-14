@@ -1182,6 +1182,14 @@ class AdminAuthIntegrationTest {
         var file = http.perform(get(java.net.URI.create(csvUrl)).cookie(session)).andExpect(status().isOk())
                 .andExpect(header().string("Cache-Control", "no-store")).andReturn().getResponse();
         var csvText = new String(file.getContentAsByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+        assertEquals(1, db.sql("""
+                SELECT count(*) FROM audit_log WHERE target_id=:id AND action='DASHBOARD_EXPORT_DOWNLOADED'
+                    AND result='SUCCESS' AND actor_id=:actor AND changes_safe='{"format":"CSV"}'::jsonb
+                """).param("id", csv).param("actor", analyst.admin().id()).query(Integer.class).single());
+        assertEquals(1, db.sql("""
+                SELECT count(*) FROM audit_log WHERE target_id=:id AND action='EXPORT_DOWNLOAD_DENIED'
+                    AND result='FAILURE' AND actor_id=:actor AND changes_safe='{"httpStatus":404}'::jsonb
+                """).param("id", csv).param("actor", other.admin().id()).query(Integer.class).single());
         assertTrue(csvText.contains(today + " ~ " + today));
         assertTrue(csvText.contains("30_PLUS"));
         assertTrue(csvText.contains("24시간 내 완료 / 진단 시작"));

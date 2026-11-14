@@ -23,6 +23,7 @@ class AdminExportsController {
     private final AdminAuth auth;
     private final AdminDashboardExports aggregates;
     private final AdminPiiExports pii;
+    private final AdminMutationJournal journal;
 
     enum Kind { DASHBOARD_AGGREGATE, CONTENT_PERFORMANCE, PII_RAW, MASKED_USERS }
     record Filter(LocalDate from, LocalDate to, String age, YfsiScoring.Pressure type,
@@ -51,10 +52,11 @@ class AdminExportsController {
     record Retry(String reason) {}
     record UserSelection(AdminBulkTagsController.Filter filter, List<UUID> userIds) {}
 
-    AdminExportsController(AdminAuth auth, AdminDashboardExports aggregates, AdminPiiExports pii) {
+    AdminExportsController(AdminAuth auth, AdminDashboardExports aggregates, AdminPiiExports pii, AdminMutationJournal journal) {
         this.auth = auth;
         this.aggregates = aggregates;
         this.pii = pii;
+        this.journal = journal;
     }
 
     @PostMapping("/exports/masked-users")
@@ -104,8 +106,15 @@ class AdminExportsController {
             @PathVariable UUID id, @RequestParam(required = false) String token, @RequestParam(required = false) String signature,
             @RequestParam(name = "pii", defaultValue = "false") boolean personal) {
         var actor = auth.identity(session);
-        var file = personal ? new AdminDashboardExports.File(AdminDashboardExports.Format.CSV, pii.download(actor, session, id, token, signature), null)
-                : aggregates.download(actor, id, token, signature);
+        AdminDashboardExports.File file;
+        try {
+            file = personal ? new AdminDashboardExports.File(AdminDashboardExports.Format.CSV, pii.download(actor, session, id, token, signature), null)
+                    : aggregates.download(actor, id, token, signature);
+        } catch (ResponseStatusException denied) {
+            int status = denied.getStatusCode().value();
+            if (actor != null && (status == 403 || status == 404)) journal.recordDownloadDenied(actor, id, status);
+            throw denied;
+        }
         boolean pdf = file.format() == AdminDashboardExports.Format.PDF;
         String name = personal ? "finsight-private-" : file.kind() == AdminDashboardExports.Kind.CONTENT_PERFORMANCE
                 ? "finsight-content-performance-" : file.kind() == AdminDashboardExports.Kind.MASKED_USERS
