@@ -154,6 +154,41 @@ class AdminAuthIntegrationTest {
         assertEquals(1, rate.guideUsers());
     }
 
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void userPagesBreakDiagnosisTimeTiesByDescendingId() throws Exception {
+        var operator = noteAdmin("OPERATOR");
+        var session = monitorSession(operator);
+        var now = java.time.OffsetDateTime.now();
+        var lower = UUID.fromString("00000000-0000-4000-8000-000000000010");
+        var higher = UUID.fromString("00000000-0000-4000-8000-000000000020");
+        var undiagnosed = UUID.fromString("00000000-0000-4000-8000-000000000030");
+        var tag = tags.create(operator, "동률 정렬 검증");
+        for (var user : java.util.List.of(lower, higher, undiagnosed)) {
+            db.sql("INSERT INTO app_user(id,email,status) VALUES (:id,:email,'ACTIVE')")
+                    .param("id", user).param("email", user + "@example.test").update();
+            db.sql("INSERT INTO user_tag VALUES (:user,:tag)").param("user", user).param("tag", tag.id()).update();
+        }
+        for (var user : java.util.List.of(lower, higher)) {
+            dashboardScore(dashboardAttempt(user, now.minusMinutes(1)), now, "DEBT", 30, 20);
+        }
+        var order = java.util.List.of(higher, lower, undiagnosed);
+        for (int index = 0; index < order.size(); index++) {
+            http.perform(get("/api/v1/admin/users").cookie(session).param("tagId", tag.id().toString())
+                            .param("includeNoDiagnosis", "true").param("size", "1").param("page", Integer.toString(index + 1)))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(3))
+                    .andExpect(jsonPath("$.items[0].id").value(order.get(index).toString()));
+        }
+        var job = dashboardExports.requestUsers(operator, null, order, "user-sort-ties");
+        dashboardExports.process(job.id());
+        var link = dashboardExports.issue(operator, job.id());
+        var params = org.springframework.web.util.UriComponentsBuilder.fromUriString(link.url()).build().getQueryParams();
+        var file = dashboardExports.download(operator, job.id(), params.getFirst("token"), params.getFirst("signature"));
+        var csv = new String(file.bytes(), java.nio.charset.StandardCharsets.UTF_8);
+        var rows = csv.lines().skip(1).map(line -> UUID.fromString(line.split(",", 2)[0].replace("\"", ""))).toList();
+        assertEquals(order, rows);
+    }
+
     private void diagnosisView(UUID attempt, String content, java.time.OffsetDateTime time) {
         db.sql("""
                 INSERT INTO diagnosis_view_event(id,attempt_id,content_id,recorded_at)
