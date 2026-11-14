@@ -84,8 +84,13 @@ class AdminAccountsIntegrationTest {
         db.sql("UPDATE admin_session SET reauth_at=now()-interval '6 minutes' WHERE admin_id=:id").param("id", rootId).update();
         body(write("POST", "/admins/invitations", root), invite).andExpect(status().isPreconditionRequired());
         db.sql("UPDATE admin_session SET reauth_at=now() WHERE admin_id=:id").param("id", rootId).update();
+        var beforeInvite = db.sql("SELECT clock_timestamp()").query(java.time.OffsetDateTime.class).single();
         var receipt = body(write("POST", "/admins/invitations", root), invite).andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.token").doesNotExist());
+        var afterInvite = db.sql("SELECT clock_timestamp()").query(java.time.OffsetDateTime.class).single();
+        var inviteExpiry = java.time.OffsetDateTime.parse(value(receipt, "expiresAt"));
+        assertFalse(inviteExpiry.isBefore(beforeInvite.plusHours(24)));
+        assertFalse(inviteExpiry.isAfter(afterInvite.plusHours(24)));
         var operator = UUID.fromString(value(receipt, "adminId"));
         body(write("POST", "/admins/invitations", root), invite).andExpect(status().isConflict());
         assertEquals("operator@example.test", db.sql("SELECT email FROM admin_account WHERE id=:id")
@@ -100,9 +105,11 @@ class AdminAccountsIntegrationTest {
                 .andExpect(status().isAccepted());
         var expiredToken = mailboxTokens().stream().filter(token -> !token.equals(initialToken)).findFirst().orElseThrow();
         http.perform(get(API + "/auth/invitations/" + initialToken)).andExpect(status().isNotFound());
+        body(write("POST", "/auth/invitations/" + initialToken + "/enrollment", null), Map.of()).andExpect(status().isNotFound());
         db.sql("UPDATE admin_invitation SET expires_at=now()-interval '1 second' WHERE token_hash=:hash")
                 .param("hash", AdminAuth.hash(expiredToken)).update();
         http.perform(get(API + "/auth/invitations/" + expiredToken)).andExpect(status().isNotFound());
+        body(write("POST", "/auth/invitations/" + expiredToken + "/enrollment", null), Map.of()).andExpect(status().isNotFound());
         body(write("POST", "/admins/" + operator + "/resend-invitation", root), Map.of("reason", REASON))
                 .andExpect(status().isAccepted());
         var token = mailboxTokens().stream().filter(candidate -> !candidate.equals(initialToken) && !candidate.equals(expiredToken))
@@ -120,6 +127,7 @@ class AdminAccountsIntegrationTest {
                 .andExpect(jsonPath("$.recoveryCodes.length()").value(10)).andReturn();
         var codes = json.readTree(activated.getResponse().getContentAsString()).path("recoveryCodes");
         body(write("POST", "/auth/activate", null), form).andExpect(status().isNotFound());
+        http.perform(get(API + "/auth/invitations/" + token)).andExpect(status().isNotFound());
         var recovery = codes.get(0).asString();
         var firstSession = recoveryLogin("operator@example.test", recovery);
         http.perform(get(API + "/admins").cookie(firstSession)).andExpect(status().isForbidden());
@@ -143,6 +151,7 @@ class AdminAccountsIntegrationTest {
         body(write("POST", "/admins/" + operator + "/mfa-reset", root), Map.of("reason", REASON))
                 .andExpect(status().isAccepted());
         http.perform(get(API + "/auth/me").cookie(secondSession)).andExpect(status().isUnauthorized());
+        http.perform(get(API + "/users").cookie(secondSession)).andExpect(status().isUnauthorized());
         assertEquals(0L, db.sql("SELECT count(*) FROM admin_recovery_code WHERE admin_id=:id")
                 .param("id", operator).query(Long.class).single());
         body(write("POST", "/auth/login", null), Map.of("email", "operator@example.test", "password", PASSWORD))
