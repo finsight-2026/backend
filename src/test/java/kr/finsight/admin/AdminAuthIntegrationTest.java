@@ -970,6 +970,74 @@ class AdminAuthIntegrationTest {
 
     @Test
     @org.springframework.transaction.annotation.Transactional
+    void campaignCancellationStopsRemainingRecipientsAndPauseSkipsMissedWindow() {
+        var operator = noteAdmin("OPERATOR");
+        db.sql("INSERT INTO admin_role VALUES (:id,'OPERATOR')").param("id", operator.admin().id()).update();
+        var reviewer = noteAdmin("SUPER_ADMIN");
+        var now = java.time.OffsetDateTime.now();
+        var recipients = new java.util.ArrayList<UUID>();
+        for (int i = 0; i < 26; i++) {
+            var user = dashboardAccount(now, false, "ACTIVE");
+            db.sql("INSERT INTO app_notification_preference(user_id,enabled) VALUES (:user,true)").param("user", user).update();
+            recipients.add(user);
+        }
+        var draft = notices.draft(operator, null, null, new AdminNotices.Fields("서비스 점검", "안내", "서비스 점검 안내입니다.", 0));
+        var review = noticeTransition(operator, draft, AdminNotices.Action.SUBMIT, null, null, false);
+        var approved = noticeTransition(reviewer, review, AdminNotices.Action.APPROVE, null, null, false);
+        var published = noticeTransition(reviewer, approved, AdminNotices.Action.PUBLISH, null, null, true);
+        var execution = now.atZoneSameInstant(AdminUsers.KST).toLocalDate().plusDays(1)
+                .atTime(10, 0).atZone(AdminUsers.KST).toOffsetDateTime();
+        var fields = new AdminCampaigns.Fields("취소 및 일시정지", null, null, recipients, AdminCampaigns.TEMPLATE,
+                published.revisionId(), execution);
+        var sending = campaigns.create(operator, fields);
+        var paused = campaigns.create(operator, fields);
+        for (var item : java.util.List.of(sending, paused)) {
+            var preview = campaigns.preview(operator, item.id(), item.version());
+            campaigns.confirm(operator, item.id(), preview.previewId(), item.version());
+        }
+
+        db.sql("UPDATE operating_settings SET crm_paused=true WHERE singleton").update();
+        campaignDispatch.run(paused.id(), execution);
+        assertEquals("SCHEDULED", campaigns.find(paused.id()).status());
+        assertTrue(campaignDispatch.deliveries(paused.id(), null).items().isEmpty());
+        db.sql("UPDATE operating_settings SET crm_paused=false,crm_resumed_at=:resumed WHERE singleton")
+                .param("resumed", execution.plusHours(2)).update();
+        campaignDispatch.run(paused.id(), execution.plusHours(2));
+        var skipped = campaignDispatch.deliveries(paused.id(), null);
+        assertEquals("PAUSED_WINDOW_SKIPPED", skipped.errorCode());
+        assertEquals(0, skipped.counts().localInbox());
+        assertEquals("FAILED", campaigns.find(paused.id()).status());
+
+        db.sql("UPDATE operating_settings SET crm_resumed_at=NULL WHERE singleton").update();
+        campaignDispatch.run(sending.id(), execution);
+        var inProgress = campaigns.find(sending.id());
+        assertEquals("SENDING", inProgress.status());
+        var before = campaignDispatch.deliveries(sending.id(), null).counts();
+        assertEquals(25, before.localInbox());
+        assertEquals(1, before.waiting());
+        var deliveredUser = db.sql("""
+                SELECT user_id FROM campaign_local_delivery WHERE campaign_id=:id AND status='LOCAL_INBOX' ORDER BY user_id LIMIT 1
+                """).param("id", sending.id()).query(UUID.class).single();
+        var device = registerCampaignDevice(deliveredUser, execution.plusDays(1));
+        db.sql("""
+                INSERT INTO app_push_delivery(notification_id,session_id,provider,state,next_at,expires_at,attempts)
+                SELECT notification_id,:device,'LOCAL','ACCEPTED',:now,:expires,1 FROM campaign_local_delivery
+                WHERE campaign_id=:id AND user_id=:user
+                """).param("device", device).param("now", execution).param("expires", execution.plusHours(2))
+                .param("id", sending.id()).param("user", deliveredUser).update();
+        assertEquals("CANCEL_REQUESTED", campaigns.cancel(operator, sending.id(), inProgress.version(), "미발송 대상 중지").status());
+        campaignDispatch.run(sending.id(), execution.plusSeconds(1));
+        campaignDispatch.run(sending.id(), execution.plusSeconds(2));
+        var canceled = campaignDispatch.deliveries(sending.id(), null).counts();
+        assertEquals("CANCELED", campaigns.find(sending.id()).status());
+        assertEquals(25, canceled.localInbox());
+        assertEquals(1, canceled.canceled());
+        assertEquals(0, canceled.waiting());
+        assertEquals(1, canceled.providerAccepted());
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
     void operatingSettingsRequireRecentMfaAndVersionAndApplyToScheduledWork() throws Exception {
         var supervisor = noteAdmin("SUPER_ADMIN");
         var operator = noteAdmin("OPERATOR");
