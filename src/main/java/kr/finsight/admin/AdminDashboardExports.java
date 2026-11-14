@@ -85,15 +85,15 @@ class AdminDashboardExports {
         lockRole(actor, Kind.MASKED_USERS);
         var id = UUID.randomUUID();
         var expires = db.sql("""
-                INSERT INTO campaign_target_preview(id,actor_id,purpose) VALUES (:id,:actor,'MASKED_EXPORT')
+                INSERT INTO admin_masked_export_preview(id,actor_id) VALUES (:id,:actor)
                 RETURNING expires_at
                 """).param("id", id).param("actor", actor.admin().id()).query(OffsetDateTime.class).single();
-        int total = users.snapshotCampaignMatches(id, filter);
+        int total = users.snapshotMaskedExportPreview(id, filter);
         int excluded = db.sql("""
-                DELETE FROM campaign_target_preview_user t USING app_user u
+                DELETE FROM admin_masked_export_preview_user t USING app_user u
                 WHERE t.preview_id=:id AND t.user_id=u.id AND u.status='DATA_DELETION_PENDING'
                 """).param("id", id).update();
-        db.sql("UPDATE campaign_target_preview SET total=:total,eligible=:eligible WHERE id=:id")
+        db.sql("UPDATE admin_masked_export_preview SET total=:total,eligible=:eligible WHERE id=:id")
                 .param("id", id).param("total", total).param("eligible", total - excluded).update();
         return new AdminCampaignTargetPreview.Preview(id, total, total - excluded, excluded, expires);
     }
@@ -110,8 +110,8 @@ class AdminDashboardExports {
         var selection = previewId != null ? previewId : ids == null ? filter : ids.stream().sorted().toList();
         return journal.once(actor, "/exports/masked-users", key, selection, Job.class, () -> {
             int expected = previewId == null ? 0 : db.sql("""
-                    SELECT eligible FROM campaign_target_preview
-                    WHERE id=:id AND actor_id=:actor AND purpose='MASKED_EXPORT' AND expires_at>clock_timestamp() FOR UPDATE
+                    SELECT eligible FROM admin_masked_export_preview
+                    WHERE id=:id AND actor_id=:actor AND expires_at>clock_timestamp() FOR UPDATE
                     """).param("id", previewId).param("actor", actor.admin().id()).query(Integer.class).optional()
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
             var id = UUID.randomUUID();
@@ -125,7 +125,7 @@ class AdminDashboardExports {
             if (!job.id().equals(id)) return job;
             int count = previewId != null ? db.sql("""
                     INSERT INTO admin_masked_export_user(export_id,user_id,data_epoch)
-                    SELECT :id,u.id,u.content_event_epoch FROM campaign_target_preview_user t
+                    SELECT :id,u.id,u.content_event_epoch FROM admin_masked_export_preview_user t
                     JOIN app_user u ON u.id=t.user_id AND u.content_event_epoch=t.data_epoch
                     WHERE t.preview_id=:preview AND u.status<>'DATA_DELETION_PENDING' FOR SHARE OF u
                     """).param("id", id).param("preview", previewId).update() : filter != null
@@ -138,7 +138,7 @@ class AdminDashboardExports {
             if (count == 0 || (previewId != null && count != expected) || (ids != null && count != ids.size())) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT);
             }
-            if (previewId != null) db.sql("DELETE FROM campaign_target_preview WHERE id=:id").param("id", previewId).update();
+            if (previewId != null) db.sql("DELETE FROM admin_masked_export_preview WHERE id=:id").param("id", previewId).update();
             db.sql("UPDATE admin_dashboard_export SET user_selection_count=:count WHERE id=:id")
                     .param("count", count).param("id", id).update();
             journal.append(actor, auditAction(Kind.MASKED_USERS, "REQUESTED"), "JOB", id.toString(), Map.of("count", count));
@@ -419,6 +419,7 @@ class AdminDashboardExports {
 
     @Scheduled(fixedDelay = 60000, initialDelay = 60000)
     void expire() {
+        db.sql("DELETE FROM admin_masked_export_preview WHERE expires_at<=clock_timestamp()").update();
         db.sql("DELETE FROM admin_dashboard_export_link WHERE expires_at<=clock_timestamp()").update();
         db.sql("UPDATE admin_dashboard_export SET archive=NULL WHERE archive IS NOT NULL AND expires_at<=clock_timestamp()")
                 .update();

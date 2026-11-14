@@ -1266,6 +1266,8 @@ class AdminAuthIntegrationTest {
         var filter = new AdminUsers.Filters(null, null, null, "30_PLUS", null, null, day, day, true, 1, 20);
         var preview = dashboardExports.previewUsers(operator, filter);
         assertEquals(1, preview.eligible());
+        assertFalse(db.sql("SELECT EXISTS(SELECT 1 FROM campaign_target_preview WHERE id=:id)")
+                .param("id", preview.previewId()).query(Boolean.class).single());
         var later = dashboardAccount(now, false, "ACTIVE");
         assertEquals(404, assertThrows(org.springframework.web.server.ResponseStatusException.class,
                 () -> dashboardExports.requestUsers(other, null, null, preview.previewId(), "foreign")).getStatusCode().value());

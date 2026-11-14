@@ -130,6 +130,14 @@ class AdminUsers {
                 .params(query.parameters()).param("id", id).update();
     }
 
+    int snapshotMaskedExportPreview(UUID id, Filters filters) {
+        var query = filterQuery(filters);
+        return db.sql("""
+                INSERT INTO admin_masked_export_preview_user(preview_id,user_id,data_epoch)
+                SELECT :id,u.id,u.content_event_epoch
+                """ + query.source()).params(query.parameters()).param("id", id).update();
+    }
+
     List<User> exportRows(UUID id) {
         return db.sql("SELECT " + USER_COLUMNS + USER_SOURCE + """
                 JOIN admin_masked_export_user e ON e.user_id=u.id AND e.data_epoch=u.content_event_epoch

@@ -110,6 +110,7 @@ class DataDeletionService {
         db.sql("DELETE FROM diagnosis_journey WHERE user_id = :user").param("user", user).update();
         db.sql("DELETE FROM operator_note WHERE user_id = :user").param("user", user).update();
         db.sql("DELETE FROM campaign_target_preview_user WHERE user_id=:user").param("user", user).update();
+        db.sql("DELETE FROM admin_masked_export_preview_user WHERE user_id=:user").param("user", user).update();
         db.sql("DELETE FROM admin_masked_export_user WHERE user_id=:user").param("user", user).update();
         db.sql("DELETE FROM pii_grant WHERE user_id = :user").param("user", user).update();
         var completed = db.sql("""
