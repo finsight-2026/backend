@@ -19,7 +19,7 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 @Profile("local")
 class SocialAccounts {
-    enum Provider { NAVER, KAKAO, APPLE }
+    enum Provider { KAKAO, APPLE }
 
     // Created only by a provider adapter after verifying its response on the server.
     record VerifiedIdentity(Provider provider, String subject, @Email @Size(max = 254) String verifiedEmail) {
@@ -164,7 +164,7 @@ class SocialAccounts {
         if (subject == null) return Result.UNLINKED;
         var hasOther = db.sql("""
                 SELECT password_hash IS NOT NULL OR EXISTS (
-                    SELECT 1 FROM app_social_identity WHERE user_id=:user AND provider<>:provider
+                    SELECT 1 FROM app_social_identity WHERE user_id=:user AND provider<>:provider AND provider IN ('KAKAO','APPLE')
                 ) FROM app_user WHERE id=:user
                 """).param("user", user).param("provider", provider.name()).query(Boolean.class).single();
         if (!hasOther) return Result.LAST_CREDENTIAL;
@@ -181,7 +181,7 @@ class SocialAccounts {
     }
 
     List<Provider> providers(UUID user) {
-        return db.sql("SELECT provider FROM app_social_identity WHERE user_id=:user ORDER BY provider")
+        return db.sql("SELECT provider FROM app_social_identity WHERE user_id=:user AND provider IN ('KAKAO','APPLE') ORDER BY provider")
                 .param("user", user).query(String.class).list().stream().map(Provider::valueOf).toList();
     }
 
@@ -199,7 +199,8 @@ class SocialAccounts {
         if (token == null || !token.matches("[A-Za-z0-9_-]{43}")) return null;
         return db.sql("""
                 SELECT provider,provider_subject,verified_email FROM app_social_onboarding
-                WHERE token_hash=:hash AND expires_at>clock_timestamp() FOR UPDATE
+                WHERE token_hash=:hash AND expires_at>clock_timestamp()
+                    AND provider IN ('KAKAO','APPLE') FOR UPDATE
                 """).param("hash", AppSessions.hash(token))
                 .query((row, index) -> new Onboarding(Provider.valueOf(row.getString(1)), row.getString(2), row.getString(3)))
                 .optional().orElse(null);

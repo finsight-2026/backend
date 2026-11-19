@@ -11,3 +11,23 @@ api.finsight.life {
 staging.finsight.life {
     import finsight_api 127.0.0.1:18081
 }
+
+finsight.life {
+    @association path /.well-known/apple-app-site-association
+    handle @association {
+        reverse_proxy 127.0.0.1:18080
+    }
+
+    @reset path /password-reset
+    handle @reset {
+        header {
+            Cache-Control "no-store"
+            Referrer-Policy "no-referrer"
+            Content-Type "text/plain; charset=utf-8"
+        }
+        respond "FINSIGHT 앱이 설치된 iPhone에서 비밀번호 재설정 이메일의 링크를 다시 열어 주세요." 200
+    }
+    handle {
+        respond 404
+    }
+}

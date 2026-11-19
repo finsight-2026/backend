@@ -9,7 +9,6 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.time.OffsetDateTime;
 import java.util.List;
-import java.util.Locale;
 import java.util.UUID;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.CacheControl;
@@ -65,10 +64,10 @@ class SocialAccountController {
         return privateResponse(authorization.start(body.provider(), body.purpose(), session(jwt), http.getRemoteAddr()));
     }
 
-    @GetMapping("/auth/social/callback/{provider:naver|kakao}")
-    ResponseEntity<Void> redirect(@PathVariable String provider, @RequestParam(required = false) String state,
+    @GetMapping("/auth/social/callback/kakao")
+    ResponseEntity<Void> kakao(@RequestParam(required = false) String state,
             @RequestParam(required = false) String code, @RequestParam(required = false) String error) {
-        return callback(SocialAccounts.Provider.valueOf(provider.toUpperCase(Locale.ROOT)), state, code, error);
+        return callback(SocialAccounts.Provider.KAKAO, state, code, error);
     }
 
     @PostMapping(value = "/auth/social/callback/apple", consumes = "application/x-www-form-urlencoded")

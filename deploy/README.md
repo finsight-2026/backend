@@ -18,7 +18,7 @@ MailLink에 발신 주소를 등록하고 자동메일 템플릿 두 개를 승�
 
 배포 환경의 `runtime.env`에 앱 키와 시크릿을 등록하고, 테스트 수신자로 발송을 승인받은 환경에서만 `FINSIGHT_MAIL_MODE=maillink`로 바꾼다. 응답의 대기열 건수와 최종 도착 여부를 MailLink 콘솔에서 각각 확인한다. iOS 재설정은 운영 링크와 앱 연결이 준비된 기기에서 검증한다. 로컬 테스트에서는 기본 `local` 모드로 개발 메일함을 사용한다.
 
-재설정 링크의 호스트는 앱 Associated Domains와 같은 `finsight.life`다. 이 호스트에서 `/.well-known/apple-app-site-association`을 HTTPS로 직접 제공하고 서버의 `FINSIGHT_IOS_APP_ID`에 서명된 앱의 실제 `application-identifier`를 설정한다. 앱 연결과 비밀번호 재설정은 서명된 iPhone 빌드에서 인수한다. [Apple Associated Domains](https://developer.apple.com/documentation/xcode/supporting-associated-domains)
+재설정 링크의 호스트는 앱 Associated Domains와 같은 `finsight.life`다. 가비아의 루트 A 레코드를 인스턴스 IPv4에 연결하고 `Caddyfile`을 배치한다. 루트 호스트는 `/.well-known/apple-app-site-association`을 운영 API에서 직접 제공하고, 브라우저로 열린 `/password-reset`에는 앱에서 링크를 다시 여는 방법을 안내한다. 운영 서버의 `FINSIGHT_IOS_APP_ID`에 서명된 앱의 실제 `application-identifier`를 설정한다. 메일 발송을 켜기 전에 루트 HTTPS의 연결 파일이 리디렉션 없이 HTTP 200으로 응답하는지 확인하고 서명된 iPhone 빌드에서 앱 연결과 비밀번호 재설정을 검증한다. [Apple Associated Domains](https://developer.apple.com/documentation/xcode/supporting-associated-domains)
 
 ## 릴리스
 

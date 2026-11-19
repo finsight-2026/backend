@@ -40,12 +40,12 @@ class ApiSecurity {
         return http.authorizeHttpRequests(requests -> {
             requests.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                     .requestMatchers(HttpMethod.GET, "/actuator/health", "/api/v1/surveys/current",
-                            "/api/v1/policies", "/api/v1/policies/*/*",
+                            "/api/v1/policies", "/api/v1/policies/*/*", "/support", "/privacy",
                             "/.well-known/apple-app-site-association").permitAll();
             if (decoder != null) {
                 requests.requestMatchers(HttpMethod.POST, publicPosts).permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/auth/social/providers",
-                                "/api/v1/auth/social/callback/naver", "/api/v1/auth/social/callback/kakao").permitAll()
+                                "/api/v1/auth/social/callback/kakao").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/account/social/start", "/api/v1/account/social/finish",
                                 "/api/v1/account/social/link").authenticated()
                         .requestMatchers(HttpMethod.DELETE, "/api/v1/account/social/*").authenticated()

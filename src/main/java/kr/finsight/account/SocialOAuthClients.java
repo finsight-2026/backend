@@ -68,7 +68,6 @@ class SocialOAuthClients implements SocialProviderGateway {
         var params = new LinkedHashMap<>(Map.of("response_type", "code", "client_id", client.id(),
                 "redirect_uri", callback(provider), "state", state));
         String url = switch (provider) {
-            case NAVER -> "https://nid.naver.com/oauth2.0/authorize";
             case KAKAO -> {
                 if (reauthenticate) params.put("prompt", "login");
                 yield "https://kauth.kakao.com/oauth/authorize";
@@ -88,13 +87,8 @@ class SocialOAuthClients implements SocialProviderGateway {
         var client = credentials.get(provider);
         var params = new LinkedHashMap<>(Map.of("grant_type", "authorization_code", "client_id", client.id(),
                 "client_secret", client.secret(), "code", code));
-        if (provider == SocialAccounts.Provider.NAVER) {
-            params.put("state", state);
-        } else {
-            params.put("redirect_uri", callback(provider));
-        }
+        params.put("redirect_uri", callback(provider));
         var tokenEndpoint = switch (provider) {
-            case NAVER -> "https://nid.naver.com/oauth2.0/token";
             case KAKAO -> "https://kauth.kakao.com/oauth/token";
             case APPLE -> APPLE + "/auth/token";
         };
@@ -102,17 +96,9 @@ class SocialOAuthClients implements SocialProviderGateway {
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(form(params))).build());
         return switch (provider) {
-            case NAVER -> naver(token);
             case KAKAO -> kakao(token);
             case APPLE -> apple(token, client.id(), state);
         };
-    }
-
-    private SocialAccounts.VerifiedIdentity naver(JsonNode token) {
-        var response = userInfo("https://openapi.naver.com/v1/nid/me", token);
-        if (!"00".equals(response.path("resultcode").asString())) throw invalidResponse();
-        // NAVER's profile email has no verification flag. Confirm it through FINSIGHT mail.
-        return identity(SocialAccounts.Provider.NAVER, response.path("response").path("id").asString(), null);
     }
 
     private SocialAccounts.VerifiedIdentity kakao(JsonNode token) {

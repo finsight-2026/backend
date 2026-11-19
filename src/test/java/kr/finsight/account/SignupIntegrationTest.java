@@ -195,7 +195,7 @@ class SignupIntegrationTest {
     @Test
     void socialSignupWithoutAnAssertedEmailRequiresAnEmailChallenge() {
         var email = UUID.randomUUID() + "@example.test";
-        var identity = new SocialAccounts.VerifiedIdentity(SocialAccounts.Provider.NAVER, UUID.randomUUID().toString(), null);
+        var identity = new SocialAccounts.VerifiedIdentity(SocialAccounts.Provider.KAKAO, UUID.randomUUID().toString(), null);
         var started = socialAccounts.signIn(identity);
         assertNull(started.verifiedEmail());
         var input = registration(email, "000000");
@@ -319,6 +319,9 @@ class SignupIntegrationTest {
     void policyReleasesPreserveHistoryAndRequireCurrentVersionForNewConsent() throws Exception {
         var base = "/api/v1/policies";
         var origin = "http://localhost:18081";
+        http.perform(get("/support")).andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("mailto:emfpdlzj@gmail.com")));
+        http.perform(get("/privacy")).andExpect(status().isServiceUnavailable());
         http.perform(get(base).header("Origin", origin)).andExpect(status().isOk())
                 .andExpect(header().string("Access-Control-Allow-Origin", origin))
                 .andExpect(header().string("Cache-Control", "no-store"))
@@ -330,11 +333,14 @@ class SignupIntegrationTest {
         var insert = """
                 INSERT INTO policy_release(version,effective_date,terms,privacy_policy,privacy_consent,research)
                 VALUES (:version,(statement_timestamp() AT TIME ZONE 'Asia/Seoul')::date+:days,
-                        '이용약관 ' || :version,'개인정보 처리방침','수집·이용 동의','연구 안내')
+                        '이용약관 ' || :version,'개인정보 <처리방침> ' || :version,'수집·이용 동의','연구 안내')
                 """;
         db.sql(insert).param("version", "release-v1").param("days", -2).update();
         db.sql(insert).param("version", "release-v2").param("days", -1).update();
         db.sql(insert).param("version", "release-v4").param("days", 1).update();
+        http.perform(get("/privacy")).andExpect(status().isOk())
+                .andExpect(header().string("Content-Type", "text/html;charset=UTF-8"))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("개인정보 &lt;처리방침&gt; release-v2")));
         http.perform(get(base)).andExpect(status().isOk()).andExpect(jsonPath("$.activeVersion").value("release-v2"));
         http.perform(get(base + "/terms/release-v1")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.document.status").value("HISTORICAL"))

@@ -93,6 +93,7 @@ class SocialAuthorization {
                 SELECT purpose,status,provider,provider_subject,verified_email FROM app_social_authorization
                 WHERE state_hash=:state AND verifier_hash=:verifier AND expires_at>clock_timestamp()
                     AND status IN ('AUTHORIZED','FAILED','CANCELED')
+                    AND provider IN ('KAKAO','APPLE')
                     AND user_id IS NOT DISTINCT FROM :user AND session_id IS NOT DISTINCT FROM :session FOR UPDATE
                 """).param("state", hash).param("verifier", AppSessions.hash(verifier))
                 .param("user", session == null ? null : session.user(), Types.OTHER)
