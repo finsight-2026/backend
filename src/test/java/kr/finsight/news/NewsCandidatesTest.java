@@ -41,7 +41,9 @@ class NewsCandidatesTest {
                   {"sourceUrl":"https://127.0.0.1/article/930005","title":"내부 주소","articlePublishedAt":"2026-11-09T06:00:00+09:00"},
                   {"sourceUrl":"https://hankyung.com@host.example/article/930006","title":"다른 주소","articlePublishedAt":"2026-11-09T06:00:00+09:00"},
                   {"sourceUrl":"https://www.hankyung.com/article/930007","title":"<script>","articlePublishedAt":"2026-11-09T06:00:00+09:00"},
-                  {"sourceUrl":"https://www.hankyung.com/article/930008","title":"발행 시각 없음","articlePublishedAt":"invalid"}
+                  {"sourceUrl":"https://www.hankyung.com/article/930008","title":"발행 시각 없음","articlePublishedAt":"invalid"},
+                  {"sourceUrl":"https://www.hankyung.com/article/930009","title":"24시간 경계","articlePublishedAt":"2026-11-08T07:00:00+09:00"},
+                  {"sourceUrl":"https://www.hankyung.com/article/930010","title":"24시간 지난 후보","articlePublishedAt":"2026-11-08T06:59:59+09:00"}
                 ]
                 """);
         var reads = new AtomicInteger();
@@ -52,19 +54,21 @@ class NewsCandidatesTest {
         collector.collect(time.plusMinutes(2));
         collector.collect(time.plusHours(1));
         assertEquals(1, reads.get());
-        assertEquals(List.of("최근 기사", "72시간 경계"),
+        assertEquals(List.of("최근 기사", "24시간 경계", "24시간 지난 후보", "72시간 경계"),
                 collector.available(time).stream().map(NewsCandidates.Candidate::title).toList());
-        assertEquals(List.of("https://www.hankyung.com/article/930001", "https://www.hankyung.com/article/930002"),
+        assertEquals(List.of("https://www.hankyung.com/article/930001", "https://www.hankyung.com/article/930009",
+                        "https://www.hankyung.com/article/930010", "https://www.hankyung.com/article/930002"),
                 collector.available(time).stream().map(NewsCandidates.Candidate::sourceUrl).toList());
-        assertEquals(2, db.sql("SELECT accepted_count FROM news_candidate_collection WHERE collection_date=:date")
+        assertEquals(4, db.sql("SELECT accepted_count FROM news_candidate_collection WHERE collection_date=:date")
                 .param("date", time.toLocalDate()).query(Integer.class).single());
         assertEquals(0, db.sql("""
-                SELECT count(*) FROM news_article WHERE source_url LIKE 'https://www.hankyung.com/article/93000%'
+                SELECT count(*) FROM news_article WHERE source_url IN (SELECT source_url FROM news_candidate)
                 """).query(Integer.class).single());
         db.sql("""
                 INSERT INTO news_article(id,source_url) VALUES (gen_random_uuid(),'https://www.hankyung.com/article/930001')
                 """).update();
-        assertEquals(List.of(), collector.available(time.plusSeconds(1)));
+        assertEquals(List.of("24시간 경계", "24시간 지난 후보"),
+                collector.available(time.plusSeconds(1)).stream().map(NewsCandidates.Candidate::title).toList());
     }
 
     @Test

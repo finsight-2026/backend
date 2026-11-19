@@ -26,6 +26,7 @@ import tools.jackson.databind.json.JsonMapper;
 @SpringBootTest(properties = {
         "finsight.auth.jwt-key=" + "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
         "finsight.signup.code-key=" + "abababababababababababababababababababababababababababababababab",
+        "finsight.admin.password-only-email=password-only@example.test",
         "finsight.admin.mfa-key=" + "edededededededededededededededededededededededededededededededed",
         "finsight.admin.note-key=" + "1212121212121212121212121212121212121212121212121212121212121212",
         "finsight.admin.pii-key=" + "3434343434343434343434343434343434343434343434343434343434343434"
@@ -154,6 +155,41 @@ class AdminAuthIntegrationTest {
         assertEquals(1, rate.guideUsers());
     }
 
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void userPagesBreakDiagnosisTimeTiesByDescendingId() throws Exception {
+        var operator = noteAdmin("OPERATOR");
+        var session = monitorSession(operator);
+        var now = java.time.OffsetDateTime.now();
+        var lower = UUID.fromString("00000000-0000-4000-8000-000000000010");
+        var higher = UUID.fromString("00000000-0000-4000-8000-000000000020");
+        var undiagnosed = UUID.fromString("00000000-0000-4000-8000-000000000030");
+        var tag = tags.create(operator, "동률 정렬 검증");
+        for (var user : java.util.List.of(lower, higher, undiagnosed)) {
+            db.sql("INSERT INTO app_user(id,email,status) VALUES (:id,:email,'ACTIVE')")
+                    .param("id", user).param("email", user + "@example.test").update();
+            db.sql("INSERT INTO user_tag VALUES (:user,:tag)").param("user", user).param("tag", tag.id()).update();
+        }
+        for (var user : java.util.List.of(lower, higher)) {
+            dashboardScore(dashboardAttempt(user, now.minusMinutes(1)), now, "DEBT", 30, 20);
+        }
+        var order = java.util.List.of(higher, lower, undiagnosed);
+        for (int index = 0; index < order.size(); index++) {
+            http.perform(get("/api/v1/admin/users").cookie(session).param("tagId", tag.id().toString())
+                            .param("includeNoDiagnosis", "true").param("size", "1").param("page", Integer.toString(index + 1)))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(3))
+                    .andExpect(jsonPath("$.items[0].id").value(order.get(index).toString()));
+        }
+        var job = dashboardExports.requestUsers(operator, null, order, "user-sort-ties");
+        dashboardExports.process(job.id());
+        var link = dashboardExports.issue(operator, job.id());
+        var params = org.springframework.web.util.UriComponentsBuilder.fromUriString(link.url()).build().getQueryParams();
+        var file = dashboardExports.download(operator, job.id(), params.getFirst("token"), params.getFirst("signature"));
+        var csv = new String(file.bytes(), java.nio.charset.StandardCharsets.UTF_8);
+        var rows = csv.lines().skip(1).map(line -> UUID.fromString(line.split(",", 2)[0].replace("\"", ""))).toList();
+        assertEquals(order, rows);
+    }
+
     private void diagnosisView(UUID attempt, String content, java.time.OffsetDateTime time) {
         db.sql("""
                 INSERT INTO diagnosis_view_event(id,attempt_id,content_id,recorded_at)
@@ -227,6 +263,36 @@ class AdminAuthIntegrationTest {
         assertEquals(java.util.List.of(0L,0L,0L,0L,1L), q1.distribution());
         assertEquals(1, questions.get(1).dropped());
         assertNull(questions.get(1).averageActiveMs());
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void questionStatsClassifyIncompleteAttemptsAtTheTwentyFourHourBoundary() {
+        var now = db.sql("SELECT now()").query(java.time.OffsetDateTime.class).single();
+        var cutoff = now.minusHours(24);
+        var user = dashboardAccount(cutoff.minusSeconds(2), false, "ACTIVE");
+        var expired = dashboardAttempt(user, cutoff);
+        var stillOpen = dashboardAttempt(user, cutoff.plusNanos(1_000));
+        for (var attempt : java.util.List.of(expired, stillOpen)) {
+            db.sql("UPDATE survey_attempt SET survey_version=:version WHERE id=:id")
+                    .param("version", kr.finsight.diagnosis.SurveyCatalog.SURVEY_VERSION).param("id", attempt).update();
+        }
+        questionEvent(expired, 2, "VIEWED", null, now);
+        questionEvent(expired, 3, "VIEWED", null, now.plusNanos(1_000));
+        questionEvent(expired, 1, "VIEWED", null, now.minusHours(1));
+        questionEvent(stillOpen, 4, "VIEWED", null, now.minusHours(1));
+
+        var from = cutoff.atZoneSameInstant(AdminUsers.KST).toLocalDate();
+        var to = now.atZoneSameInstant(AdminUsers.KST).toLocalDate();
+        var questions = funnel.questions(from, to);
+        assertEquals(1, questions.get(0).reached());
+        assertEquals(0, questions.get(0).dropped());
+        assertEquals(1, questions.get(1).reached());
+        assertEquals(1, questions.get(1).dropped());
+        assertEquals(0, questions.get(2).reached());
+        assertEquals(1, questions.get(3).reached());
+        assertEquals(0, questions.get(3).dropped());
+        assertTrue(questions.stream().allMatch(question -> question.distribution().stream().allMatch(count -> count == 0)));
     }
 
     private void questionEvent(UUID attempt, int question, String kind, Integer active, java.time.OffsetDateTime time) {
@@ -876,22 +942,31 @@ class AdminAuthIntegrationTest {
         var eligible = dashboardAccount(now, false, "ACTIVE");
         var optedOut = dashboardAccount(now, false, "ACTIVE");
         var capped = dashboardAccount(now, false, "ACTIVE");
+        var reminder = dashboardAccount(now, false, "ACTIVE");
         db.sql("""
-                INSERT INTO app_notification_preference(user_id,enabled) VALUES (:first,true),(:second,true),(:third,true)
-                """).param("first", eligible).param("second", optedOut).param("third", capped).update();
+                INSERT INTO app_notification_preference(user_id,enabled,incomplete)
+                VALUES (:first,true,false),(:second,true,false),(:third,true,false),(:reminder,true,true)
+                """).param("first", eligible).param("second", optedOut).param("third", capped).param("reminder", reminder).update();
         var draft = notices.draft(creator, null, null,
                 new AdminNotices.Fields("서비스 점검", "점검 안내", "서비스를 점검합니다.", 0));
         var submitted = noticeTransition(creator, draft, AdminNotices.Action.SUBMIT, null, null, false);
         var approved = noticeTransition(reviewer, submitted, AdminNotices.Action.APPROVE, null, null, false);
         noticeTransition(reviewer, approved, AdminNotices.Action.PUBLISH, null, null, true);
         var scheduled = AdminCampaigns.executionTime(now.plusDays(1), null);
-        var input = new AdminCampaigns.Fields("서비스 점검", null, null, java.util.List.of(eligible, optedOut, capped),
+        var evening = scheduled.atZoneSameInstant(AdminUsers.KST).toLocalDate()
+                .atTime(20, 0).atZone(AdminUsers.KST).toOffsetDateTime();
+        db.sql("""
+                INSERT INTO survey_attempt(id,user_id,survey_version,formula_version,started_at,aborted_at,last_question)
+                VALUES (gen_random_uuid(),:user,'test','test',:started,:aborted,4)
+                """).param("user", reminder).param("started", evening.minusDays(1).minusHours(2))
+                .param("aborted", evening.minusDays(1).minusHours(1)).update();
+        var input = new AdminCampaigns.Fields("서비스 점검", null, null, java.util.List.of(eligible, optedOut, capped, reminder),
                 AdminCampaigns.TEMPLATE, draft.revisionId(), scheduled);
         var first = campaigns.create(creator, input);
         var second = campaigns.create(creator, input);
         for (var item : java.util.List.of(first, second)) {
             var preview = campaigns.preview(operator, item.id(), item.version());
-            assertEquals(3, preview.counts().localEligible());
+            assertEquals(4, preview.counts().localEligible());
             campaigns.confirm(operator, item.id(), preview.previewId(), item.version());
         }
         db.sql("UPDATE app_notification_preference SET enabled=false WHERE user_id=:user")
@@ -902,6 +977,7 @@ class AdminAuthIntegrationTest {
                 """).param("id", UUID.randomUUID()).param("user", capped)
                 .param("day", scheduled.atZoneSameInstant(AdminUsers.KST).toLocalDate()).update();
         var device = registerCampaignDevice(eligible, scheduled.plusDays(1));
+        var successfulDevice = registerCampaignDevice(eligible, scheduled.plusDays(1));
         campaignDispatch.run(first.id(), scheduled);
         campaignDispatch.run(first.id(), scheduled);
         campaignDispatch.run(second.id(), scheduled);
@@ -909,13 +985,14 @@ class AdminAuthIntegrationTest {
         assertEquals("COMPLETED", campaigns.find(first.id()).status());
         assertEquals(1, firstResult.counts().localInbox());
         assertEquals(0, firstResult.counts().providerAccepted());
-        assertEquals(Map.of("OPTED_OUT", 1L, "DAILY_CAP", 1L), firstResult.reasons());
+        assertEquals(Map.of("OPTED_OUT", 1L, "DAILY_CAP", 1L, "REMINDER_PRIORITY", 1L), firstResult.reasons());
         assertTrue(firstResult.items().stream().allMatch(row -> row.recipient().endsWith("***@***")));
         var secondResult = campaignDispatch.deliveries(second.id(), AdminCampaignDispatch.DeliveryStatus.EXCLUDED);
         assertEquals(0, secondResult.counts().localInbox());
-        assertEquals(Map.of("DUPLICATE_NOTICE", 1L, "OPTED_OUT", 1L, "DAILY_CAP", 1L), secondResult.reasons());
-        assertEquals(3, secondResult.items().size());
-        var duplicateCampaign = campaigns.create(creator, input);
+        assertEquals(Map.of("DUPLICATE_NOTICE", 1L, "OPTED_OUT", 1L, "DAILY_CAP", 1L, "REMINDER_PRIORITY", 1L), secondResult.reasons());
+        assertEquals(4, secondResult.items().size());
+        var duplicateCampaign = campaigns.create(creator, new AdminCampaigns.Fields("중복 공지", null, null,
+                java.util.List.of(eligible, optedOut, capped), AdminCampaigns.TEMPLATE, draft.revisionId(), scheduled));
         var duplicatePreview = campaigns.preview(operator, duplicateCampaign.id(), duplicateCampaign.version());
         assertEquals(0, duplicatePreview.counts().localEligible());
         assertEquals(1L, duplicatePreview.counts().excludedByReason().get("DUPLICATE_NOTICE"));
@@ -923,20 +1000,24 @@ class AdminAuthIntegrationTest {
                 SELECT count(*) FROM app_notification n JOIN app_notification_local_slot s ON s.notification_id=n.id
                 WHERE n.user_id=:user AND n.kind='NOTICE' AND n.event_key=:key AND s.category='REMINDER'
                 """).param("user", eligible).param("key", draft.revisionId().toString()).query(Integer.class).single());
-        assertEquals(1, db.sql("""
-                SELECT count(*) FROM app_push_delivery p JOIN app_notification n ON n.id=p.notification_id
-                WHERE p.session_id=:session AND n.kind='NOTICE' AND p.state='WAITING'
-                """).param("session", device).query(Integer.class).single());
+        var waitingDevices = db.sql("""
+                SELECT p.session_id FROM app_push_delivery p JOIN app_notification n ON n.id=p.notification_id
+                WHERE n.user_id=:user AND n.event_key=:revision AND n.kind='NOTICE' AND p.state='WAITING'
+                """).param("user", eligible).param("revision", draft.revisionId().toString()).query(UUID.class).list();
+        assertEquals(2, waitingDevices.size());
+        assertEquals(java.util.Set.of(device, successfulDevice), java.util.Set.copyOf(waitingDevices));
         var retryAt = scheduled.plusMinutes(20);
         db.sql("UPDATE app_push_delivery SET state='FAILED',attempts=4,next_at=:next WHERE session_id=:id")
                 .param("id", device).param("next", retryAt.plusMinutes(1)).update();
+        db.sql("UPDATE app_push_delivery SET state='ACCEPTED',attempts=1 WHERE session_id=:id")
+                .param("id", successfulDevice).update();
         var unknownDevice = UUID.randomUUID();
         db.sql("""
                 INSERT INTO app_push_delivery(notification_id,session_id,provider,state,next_at,expires_at,attempts)
                 SELECT notification_id,:unknown,provider,'UNKNOWN',next_at,expires_at,1
                 FROM app_push_delivery WHERE session_id=:device
                 """).param("unknown", unknownDevice).param("device", device).update();
-        assertEquals(Map.of("FAILED", 1L, "UNKNOWN", 1L), campaignDispatch.deliveries(first.id(), null).deviceCounts());
+        assertEquals(Map.of("FAILED", 1L, "UNKNOWN", 1L, "ACCEPTED", 1L), campaignDispatch.deliveries(first.id(), null).deviceCounts());
         db.sql("UPDATE app_notification_preference SET enabled=false WHERE user_id=:user")
                 .param("user", eligible).update();
         assertEquals(409, assertThrows(org.springframework.web.server.ResponseStatusException.class,
@@ -948,7 +1029,7 @@ class AdminAuthIntegrationTest {
         assertEquals(receipt, campaignDispatch.retryDevices(operator, first.id(), "retry", "운영 점검", retryAt));
         assertEquals(409, assertThrows(org.springframework.web.server.ResponseStatusException.class,
                 () -> campaignDispatch.retryDevices(operator, first.id(), "retry", "다른 사유", retryAt)).getStatusCode().value());
-        assertEquals(Map.of("UNKNOWN", 1L, "WAITING", 1L), campaignDispatch.deliveries(first.id(), null).deviceCounts());
+        assertEquals(Map.of("UNKNOWN", 1L, "WAITING", 1L, "ACCEPTED", 1L), campaignDispatch.deliveries(first.id(), null).deviceCounts());
         assertEquals(1, db.sql("""
                 SELECT count(*) FROM app_push_delivery WHERE session_id=:id AND attempts=4
                     AND next_at=:next AND manual_retry_at=:manual
@@ -959,6 +1040,56 @@ class AdminAuthIntegrationTest {
                 () -> campaignDispatch.retryDevices(operator, first.id(), "repeat", "다시 점검", retryAt)).getStatusCode().value());
     }
 
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void scheduledCampaignUsesSavedSegmentAndRechecksLiveEligibility() {
+        var operator = noteAdmin("OPERATOR");
+        db.sql("INSERT INTO admin_role VALUES (:id,'OPERATOR')").param("id", operator.admin().id()).update();
+        var reviewer = noteAdmin("SUPER_ADMIN");
+        var now = java.time.OffsetDateTime.now();
+        var eligible = dashboardAccount(now, false, "ACTIVE");
+        var optedOut = dashboardAccount(now, false, "ACTIVE");
+        var withdrawing = dashboardAccount(now, false, "ACTIVE");
+        var changed = dashboardAccount(now, false, "ACTIVE");
+        var newRevisionOnly = dashboardAccount(now, false, "ACTIVE");
+        var originalTag = tags.create(operator, "예약 당시 대상");
+        var updatedTag = tags.create(operator, "예약 이후 신규 조건");
+        for (var user : java.util.List.of(eligible, optedOut, withdrawing, changed, newRevisionOnly)) {
+            db.sql("INSERT INTO app_notification_preference(user_id,enabled) VALUES (:user,true)")
+                    .param("user", user).update();
+            db.sql("INSERT INTO user_tag VALUES (:user,:tag)").param("user", user)
+                    .param("tag", user.equals(newRevisionOnly) ? updatedTag.id() : originalTag.id()).update();
+        }
+        var segment = segments.create(operator, new AdminSegments.Fields("예약 대상", "",
+                new AdminSegments.Conditions(null, null, null, null, null, null, null, java.util.List.of(originalTag.id()))));
+        var draft = notices.draft(operator, null, null, new AdminNotices.Fields("서비스 점검", "안내", "서비스 점검 안내입니다.", 0));
+        var review = noticeTransition(operator, draft, AdminNotices.Action.SUBMIT, null, null, false);
+        var approved = noticeTransition(reviewer, review, AdminNotices.Action.APPROVE, null, null, false);
+        var published = noticeTransition(reviewer, approved, AdminNotices.Action.PUBLISH, null, null, true);
+        var execution = AdminCampaigns.executionTime(now.plusDays(1), null);
+        var campaign = campaigns.create(operator, new AdminCampaigns.Fields("예약 검증", segment.id(), segment.definitionVersion(),
+                null, AdminCampaigns.TEMPLATE, published.revisionId(), execution));
+        var preview = campaigns.preview(operator, campaign.id(), campaign.version());
+        assertEquals(4, preview.counts().localEligible());
+        assertEquals(0, db.sql("SELECT count(*) FROM campaign_job WHERE campaign_id=:id")
+                .param("id", campaign.id()).query(Integer.class).single());
+        campaigns.confirm(operator, campaign.id(), preview.previewId(), campaign.version());
+
+        var edited = segments.update(operator, segment.id(), new AdminSegments.Fields("새 예약 대상", "",
+                new AdminSegments.Conditions(null, null, null, null, null, null, null, java.util.List.of(updatedTag.id()))), segment.version());
+        assertEquals(segment.definitionVersion() + 1, edited.definitionVersion());
+        db.sql("UPDATE app_notification_preference SET enabled=false WHERE user_id=:user").param("user", optedOut).update();
+        db.sql("UPDATE app_user SET status='WITHDRAWAL_PENDING' WHERE id=:user").param("user", withdrawing).update();
+        db.sql("DELETE FROM user_tag WHERE user_id=:user AND tag_id=:tag").param("user", changed).param("tag", originalTag.id()).update();
+
+        campaignDispatch.run(campaign.id(), execution);
+        assertEquals(segment.definitionVersion(), campaigns.find(campaign.id()).segmentVersion());
+        var delivered = db.sql("SELECT user_id FROM app_notification WHERE kind='NOTICE' AND event_key=:revision")
+                .param("revision", published.revisionId().toString()).query(UUID.class).list();
+        assertEquals(java.util.List.of(eligible), delivered);
+        assertEquals(Map.of("OPTED_OUT", 1L, "WITHDRAWAL_PENDING", 1L), campaignDispatch.deliveries(campaign.id(), null).reasons());
+    }
+
     private UUID registerCampaignDevice(UUID user, java.time.OffsetDateTime expiry) {
         var device = UUID.randomUUID();
         db.sql("INSERT INTO app_session(id,user_id,refresh_hash,expires_at) VALUES (:device,:user,:hash,:expires)")
@@ -966,6 +1097,74 @@ class AdminAuthIntegrationTest {
         db.sql("INSERT INTO app_push_registration(session_id,provider,registration_token) VALUES (:device,'LOCAL',:token)")
                 .param("device", device).param("token", device.toString()).update();
         return device;
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void campaignCancellationStopsRemainingRecipientsAndPauseSkipsMissedWindow() {
+        var operator = noteAdmin("OPERATOR");
+        db.sql("INSERT INTO admin_role VALUES (:id,'OPERATOR')").param("id", operator.admin().id()).update();
+        var reviewer = noteAdmin("SUPER_ADMIN");
+        var now = java.time.OffsetDateTime.now();
+        var recipients = new java.util.ArrayList<UUID>();
+        for (int i = 0; i < 26; i++) {
+            var user = dashboardAccount(now, false, "ACTIVE");
+            db.sql("INSERT INTO app_notification_preference(user_id,enabled) VALUES (:user,true)").param("user", user).update();
+            recipients.add(user);
+        }
+        var draft = notices.draft(operator, null, null, new AdminNotices.Fields("서비스 점검", "안내", "서비스 점검 안내입니다.", 0));
+        var review = noticeTransition(operator, draft, AdminNotices.Action.SUBMIT, null, null, false);
+        var approved = noticeTransition(reviewer, review, AdminNotices.Action.APPROVE, null, null, false);
+        var published = noticeTransition(reviewer, approved, AdminNotices.Action.PUBLISH, null, null, true);
+        var execution = now.atZoneSameInstant(AdminUsers.KST).toLocalDate().plusDays(1)
+                .atTime(10, 0).atZone(AdminUsers.KST).toOffsetDateTime();
+        var fields = new AdminCampaigns.Fields("취소 및 일시정지", null, null, recipients, AdminCampaigns.TEMPLATE,
+                published.revisionId(), execution);
+        var sending = campaigns.create(operator, fields);
+        var paused = campaigns.create(operator, fields);
+        for (var item : java.util.List.of(sending, paused)) {
+            var preview = campaigns.preview(operator, item.id(), item.version());
+            campaigns.confirm(operator, item.id(), preview.previewId(), item.version());
+        }
+
+        db.sql("UPDATE operating_settings SET crm_paused=true WHERE singleton").update();
+        campaignDispatch.run(paused.id(), execution);
+        assertEquals("SCHEDULED", campaigns.find(paused.id()).status());
+        assertTrue(campaignDispatch.deliveries(paused.id(), null).items().isEmpty());
+        db.sql("UPDATE operating_settings SET crm_paused=false,crm_resumed_at=:resumed WHERE singleton")
+                .param("resumed", execution.plusHours(2)).update();
+        campaignDispatch.run(paused.id(), execution.plusHours(2));
+        var skipped = campaignDispatch.deliveries(paused.id(), null);
+        assertEquals("PAUSED_WINDOW_SKIPPED", skipped.errorCode());
+        assertEquals(0, skipped.counts().localInbox());
+        assertEquals("FAILED", campaigns.find(paused.id()).status());
+
+        db.sql("UPDATE operating_settings SET crm_resumed_at=NULL WHERE singleton").update();
+        campaignDispatch.run(sending.id(), execution);
+        var inProgress = campaigns.find(sending.id());
+        assertEquals("SENDING", inProgress.status());
+        var before = campaignDispatch.deliveries(sending.id(), null).counts();
+        assertEquals(25, before.localInbox());
+        assertEquals(1, before.waiting());
+        var deliveredUser = db.sql("""
+                SELECT user_id FROM campaign_local_delivery WHERE campaign_id=:id AND status='LOCAL_INBOX' ORDER BY user_id LIMIT 1
+                """).param("id", sending.id()).query(UUID.class).single();
+        var device = registerCampaignDevice(deliveredUser, execution.plusDays(1));
+        db.sql("""
+                INSERT INTO app_push_delivery(notification_id,session_id,provider,state,next_at,expires_at,attempts)
+                SELECT notification_id,:device,'LOCAL','ACCEPTED',:now,:expires,1 FROM campaign_local_delivery
+                WHERE campaign_id=:id AND user_id=:user
+                """).param("device", device).param("now", execution).param("expires", execution.plusHours(2))
+                .param("id", sending.id()).param("user", deliveredUser).update();
+        assertEquals("CANCEL_REQUESTED", campaigns.cancel(operator, sending.id(), inProgress.version(), "미발송 대상 중지").status());
+        campaignDispatch.run(sending.id(), execution.plusSeconds(1));
+        campaignDispatch.run(sending.id(), execution.plusSeconds(2));
+        var canceled = campaignDispatch.deliveries(sending.id(), null).counts();
+        assertEquals("CANCELED", campaigns.find(sending.id()).status());
+        assertEquals(25, canceled.localInbox());
+        assertEquals(1, canceled.canceled());
+        assertEquals(0, canceled.waiting());
+        assertEquals(1, canceled.providerAccepted());
     }
 
     @Test
@@ -1336,6 +1535,7 @@ class AdminAuthIntegrationTest {
         var now = java.time.OffsetDateTime.now();
         var today = now.atZoneSameInstant(AdminUsers.KST).toLocalDate().toString();
         var user = dashboardAccount(now, false, "ACTIVE");
+        var privateEmail = user + "@example.test";
         var root = "/api/v1/admin/exports";
         var filter = Map.of("from", today, "to", today, "age", "30_PLUS");
         var request = Map.of("kind", "DASHBOARD_AGGREGATE", "filter", filter, "format", "CSV");
@@ -1378,16 +1578,24 @@ class AdminAuthIntegrationTest {
         http.perform(get(java.net.URI.create(csvUrl)).cookie(session)).andExpect(status().isNotFound());
 
         var pdf = read(postJson(write.apply(root, session), pdfRequest).andExpect(status().isAccepted()), "id");
+        var snapshotTime = exportSnapshotTime();
         dashboardExports.process(UUID.fromString(pdf));
         var pdfUrl = read(postJson(write.apply(root + "/" + pdf + "/download", session), Map.of())
                 .andExpect(status().isOk()), "url");
         var pdfBytes = http.perform(get(java.net.URI.create(pdfUrl)).cookie(session)).andExpect(status().isOk())
-                .andExpect(content().contentType("application/pdf")).andReturn().getResponse().getContentAsByteArray();
+                .andExpect(content().contentType("application/pdf")).andExpect(header().string("Cache-Control", "no-store"))
+                .andReturn().getResponse().getContentAsByteArray();
         try (var document = org.apache.pdfbox.Loader.loadPDF(pdfBytes)) {
             assertTrue(document.getNumberOfPages() >= 2);
             var extracted = new org.apache.pdfbox.text.PDFTextStripper().getText(document);
             assertTrue(extracted.contains("FINSIGHT 대시보드 집계"));
             assertTrue(extracted.contains("가입 7일 재방문율"));
+            assertTrue(extracted.contains(today + " ~ " + today));
+            assertTrue(extracted.contains("30_PLUS"));
+            assertTrue(extracted.contains("집계 시각 (KST)"));
+            assertTrue(extracted.contains(snapshotTime));
+            assertFalse(extracted.contains(user.toString()));
+            assertFalse(extracted.contains(privateEmail));
         }
         var cancellable = read(postJson(write.apply(root, session), request).andExpect(status().isAccepted()), "id");
         postJson(write.apply(jobs + "/" + cancellable + "/cancel", session), Map.of("reason", "필터 변경"))
@@ -1420,17 +1628,76 @@ class AdminAuthIntegrationTest {
         var abandoned = jobLeases.acquire(AdminDashboardExports.QUEUE, job.id()).orElseThrow();
         dashboardExports.process(job.id());
         http.perform(get(path).cookie(session)).andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("RUNNING")).andExpect(jsonPath("$.startedAt").isString());
+                .andExpect(jsonPath("$.status").value("RUNNING")).andExpect(jsonPath("$.startedAt").isString())
+                .andExpect(jsonPath("$.processed").value(0)).andExpect(jsonPath("$.total").value(1));
         http.perform(get("/api/v1/admin/jobs").param("status", "RUNNING").cookie(session))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.items[0].id").value(job.id().toString()));
         db.sql("UPDATE job_execution_lease SET expires_at=clock_timestamp()-interval '1 second' WHERE job_id=:id")
                 .param("id", job.id()).update();
         assertFalse(jobLeases.lockOwned(abandoned));
         dashboardExports.process(job.id());
+        var completed = http.perform(get(path).cookie(session)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.completedAt").isString());
+        var completedAt = read(completed, "completedAt");
+        dashboardExports.process(job.id());
         http.perform(get(path).cookie(session)).andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("COMPLETED")).andExpect(jsonPath("$.retryCount").value(0));
+                .andExpect(jsonPath("$.status").value("COMPLETED")).andExpect(jsonPath("$.retryCount").value(0))
+                .andExpect(jsonPath("$.processed").value(1)).andExpect(jsonPath("$.total").value(1))
+                .andExpect(jsonPath("$.completedAt").value(completedAt));
+        http.perform(get("/api/v1/admin/jobs").param("status", "COMPLETED").cookie(session))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.items[0].id").value(job.id().toString()))
+                .andExpect(jsonPath("$.items[0].processed").value(1)).andExpect(jsonPath("$.items[0].total").value(1));
         assertEquals(1, db.sql("SELECT count(*) FROM admin_dashboard_export WHERE id=:id AND archive IS NOT NULL")
                 .param("id", job.id()).query(Integer.class).single());
+    }
+
+    @Test
+    @org.springframework.test.annotation.DirtiesContext(methodMode = org.springframework.test.annotation.DirtiesContext.MethodMode.AFTER_METHOD)
+    void aggregateExportRecoversAfterPostgresRejectsArchiveWrite() {
+        var actor = noteAdmin("ANALYST");
+        db.sql("INSERT INTO admin_role VALUES (:id,'ANALYST')").param("id", actor.admin().id()).update();
+        var job = dashboardExports.request(actor, new AdminDashboardExports.Request(
+                AdminDashboardExports.Kind.DASHBOARD_AGGREGATE, null, null, AdminDashboardExports.Format.CSV));
+        try {
+            db.sql("""
+                    CREATE FUNCTION test_reject_admin_archive() RETURNS trigger LANGUAGE plpgsql AS $$
+                    BEGIN RAISE EXCEPTION 'fixture archive storage failure' USING ERRCODE='53000'; END;
+                    $$
+                    """).update();
+            try {
+                db.sql("""
+                        CREATE TRIGGER test_reject_admin_archive BEFORE UPDATE OF archive ON admin_dashboard_export
+                        FOR EACH ROW WHEN (NEW.id='%s'::uuid AND NEW.archive IS NOT NULL)
+                        EXECUTE FUNCTION test_reject_admin_archive()
+                        """.formatted(job.id())).update();
+                dashboardExports.process(job.id());
+                assertTrue(db.sql("""
+                        SELECT status='QUEUED' AND archive IS NULL AND completed_at IS NULL
+                            AND retry_count=1 AND next_run_at>clock_timestamp() AND error_code='EXPORT_BUILD_FAILED'
+                        FROM admin_dashboard_export WHERE id=:id
+                        """).param("id", job.id()).query(Boolean.class).single());
+                assertEquals(404, assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                        () -> dashboardExports.issue(actor, job.id())).getStatusCode().value());
+            } finally {
+                db.sql("DROP TRIGGER IF EXISTS test_reject_admin_archive ON admin_dashboard_export").update();
+                db.sql("DROP FUNCTION test_reject_admin_archive()").update();
+            }
+            db.sql("UPDATE admin_dashboard_export SET next_run_at=clock_timestamp()-interval '1 second' WHERE id=:id")
+                    .param("id", job.id()).update();
+            dashboardExports.process(job.id());
+            assertTrue(db.sql("""
+                    SELECT status='COMPLETED' AND archive IS NOT NULL AND completed_at IS NOT NULL
+                        AND retry_count=1 AND error_code IS NULL
+                    FROM admin_dashboard_export WHERE id=:id
+                    """).param("id", job.id()).query(Boolean.class).single());
+            var link = dashboardExports.issue(actor, job.id());
+            var parameters = org.springframework.web.util.UriComponentsBuilder.fromUriString(link.url()).build().getQueryParams();
+            var file = dashboardExports.download(actor, job.id(), parameters.getFirst("token"), parameters.getFirst("signature"));
+            assertTrue(new String(file.bytes(), java.nio.charset.StandardCharsets.UTF_8).contains("집계 시각 (KST)"));
+        } finally {
+            db.sql("DELETE FROM admin_dashboard_export WHERE id=:id").param("id", job.id()).update();
+            db.sql("DELETE FROM admin_role WHERE admin_id=:id").param("id", actor.admin().id()).update();
+        }
     }
 
     @Test
@@ -1560,6 +1827,7 @@ class AdminAuthIntegrationTest {
 
         var pdf = read(postJson(write.apply(exports, session).header("Idempotency-Key", "pdf"), pdfRequest)
                 .andExpect(status().isAccepted()), "id");
+        var snapshotTime = exportSnapshotTime();
         dashboardExports.process(UUID.fromString(pdf));
         var pdfLink = read(postJson(write.apply(exports + "/" + pdf + "/download", session), Map.of())
                 .andExpect(status().isOk()), "url");
@@ -1572,10 +1840,23 @@ class AdminAuthIntegrationTest {
             assertTrue(extracted.contains("잠정 집계"));
             assertTrue(extracted.contains("조회율 분모"));
             assertTrue(extracted.contains(formulaTitle));
+            assertTrue(extracted.contains(date + " ~ " + date));
+            assertTrue(extracted.contains("부채부담형"));
+            assertTrue(extracted.contains("DEBT-1"));
+            assertTrue(extracted.contains("집계 기준 (KST)"));
+            assertTrue(extracted.contains(snapshotTime));
+            assertFalse(extracted.contains("DEBT-2"));
+            assertFalse(extracted.contains(actor.toString()));
+            assertFalse(extracted.contains(viewer + "@example.test"));
         }
         db.sql("INSERT INTO deletion_operation(id,kind,status,completed_at) VALUES (gen_random_uuid(),'DATA_DELETION','COMPLETED',now())").update();
         http.perform(get(java.net.URI.create(pdfLink)).cookie(session)).andExpect(status().isNotFound());
         http.perform(get(jobs + "/" + pdf).cookie(session)).andExpect(jsonPath("$.errorCode").value("SOURCE_CHANGED"));
+    }
+
+    private String exportSnapshotTime() {
+        return db.sql("SELECT now()").query(java.time.OffsetDateTime.class).single()
+                .atZoneSameInstant(AdminUsers.KST).toOffsetDateTime().truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString();
     }
 
     private jakarta.servlet.http.Cookie monitorSession(AdminAuth.Identity admin) throws Exception {
@@ -1798,6 +2079,60 @@ class AdminAuthIntegrationTest {
         http.perform(write.apply("/activity").cookie(session)).andExpect(status().isUnauthorized());
         http.perform(write.apply("/logout").cookie(session)).andExpect(status().isNoContent());
         assertEquals(0, db.sql("SELECT count(*) FROM admin_session").query(Integer.class).single());
+    }
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void passwordOnlyLoginRequiresConfiguredActiveAccountAndDoesNotSatisfyRecentMfa() throws Exception {
+        var email = "password-only@example.test";
+        var password = "LocalExamplePassword123!";
+        var admin = UUID.randomUUID();
+        var other = UUID.randomUUID();
+        var hash = auth.passwordHash(password);
+        for (var entry : Map.of(email, admin, "other-mfa@example.test", other).entrySet()) {
+            db.sql("""
+                    INSERT INTO admin_account (id,email,name,password_hash,totp_secret_encrypted,status)
+                    VALUES (:id,:email,'테스트',:hash,:secret,'ACTIVE')
+                    """).param("id", entry.getValue()).param("email", entry.getKey()).param("hash", hash)
+                    .param("secret", totp.encrypt(AdminTotp.decodeBase32(SEED))).update();
+            db.sql("INSERT INTO admin_role VALUES (:id,'SUPER_ADMIN')").param("id", entry.getValue()).update();
+        }
+        var csrf = http.perform(get(PATH + "/csrf").secure(true)).andExpect(status().isOk()).andReturn().getResponse();
+        var csrfBody = json.readTree(csrf.getContentAsString());
+        var csrfCookie = csrf.getCookie("__Secure-FINSIGHT_ADMIN_CSRF");
+        java.util.function.Function<String, MockHttpServletRequestBuilder> write = endpoint ->
+                post(PATH + endpoint).secure(true).header("Origin", ORIGIN).cookie(csrfCookie)
+                        .header(csrfBody.get("headerName").asString(), csrfBody.get("token").asString())
+                        .contentType("application/json");
+
+        postJson(write.apply("/login"), Map.of("email", email, "password", "invalid", "passwordSessionSupported", true))
+                .andExpect(status().isUnauthorized()).andExpect(cookie().doesNotExist(AdminAuthController.SESSION_COOKIE));
+        postJson(write.apply("/login"), Map.of("email", email, "password", password))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.challengeId").exists())
+                .andExpect(cookie().doesNotExist(AdminAuthController.SESSION_COOKIE));
+        postJson(write.apply("/login"), Map.of("email", "other-mfa@example.test", "password", password,
+                "passwordSessionSupported", true)).andExpect(status().isOk()).andExpect(jsonPath("$.challengeId").exists())
+                .andExpect(cookie().doesNotExist(AdminAuthController.SESSION_COOKIE));
+        var login = postJson(write.apply("/login"), Map.of("email", email, "password", password,
+                "passwordSessionSupported", true)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.admin.id").value(admin.toString())).andExpect(jsonPath("$.challengeId").doesNotExist())
+                .andReturn();
+        var session = login.getResponse().getCookie(AdminAuthController.SESSION_COOKIE);
+        assertNotNull(session);
+        assertTrue(session.isHttpOnly());
+        assertTrue(session.getSecure());
+        assertEquals("Strict", session.getAttribute("SameSite"));
+        http.perform(get(PATH + "/me").cookie(session)).andExpect(status().isOk());
+        assertFalse(auth.recentlyVerified(session.getValue(), admin));
+        var code = AdminTotp.codeAt(AdminTotp.decodeBase32(SEED), Instant.now().getEpochSecond() / 30);
+        postJson(write.apply("/reauth").cookie(session), Map.of("code", code)).andExpect(status().isNoContent());
+        assertTrue(auth.recentlyVerified(session.getValue(), admin));
+        http.perform(write.apply("/logout").cookie(session)).andExpect(status().isNoContent());
+        http.perform(get(PATH + "/me").cookie(session)).andExpect(status().isUnauthorized());
+
+        db.sql("UPDATE admin_account SET status='SUSPENDED' WHERE id=:id").param("id", admin).update();
+        postJson(write.apply("/login"), Map.of("email", email, "password", password, "passwordSessionSupported", true))
+                .andExpect(status().isUnauthorized()).andExpect(cookie().doesNotExist(AdminAuthController.SESSION_COOKIE));
     }
 
     private ResultActions postJson(MockHttpServletRequestBuilder request, Object body) throws Exception {
